@@ -52,6 +52,9 @@ export const credentialsSchema: Record<string, FieldDef[]> = {
   whatsapp: [
     { key: "bridge_url", label: "Bridge URL", type: "text", required: true, placeholder: "http://bridge:3000" },
   ],
+  voicebox: [
+    { key: "secret_key", label: "Secret Key", type: "password", help: "Used when auth_mode is token" },
+  ],
 };
 
 // --- Config schemas ---
@@ -109,6 +112,17 @@ export const configSchema: Record<string, FieldDef[]> = {
     { key: "dm_policy", label: "DM Policy", type: "select", options: dmPolicyOptions, defaultValue: "open" },
     { key: "group_policy", label: "Group Policy", type: "select", options: groupPolicyOptions, defaultValue: "open" },
     { key: "allow_from", label: "Allowed Users", type: "tags", help: "WhatsApp user IDs" },
+  ],
+  voicebox: [
+    { key: "dm_policy", label: "DM Policy", type: "select", options: dmPolicyOptions, defaultValue: "pairing" },
+    { key: "auth_mode", label: "Auth Mode", type: "select", options: [{ value: "open", label: "Open" }, { value: "token", label: "Token (HMAC)" }], defaultValue: "open" },
+    { key: "token_expiry", label: "Token Expiry (seconds)", type: "number", defaultValue: 2592000, help: "Default 30 days" },
+    { key: "allowed_devices", label: "Allowed Device IDs", type: "tags", help: "Whitelist bypass for token auth" },
+    { key: "allow_from", label: "Allowed Senders", type: "tags", help: "Used when dm_policy=allowlist" },
+    { key: "stt_proxy_url", label: "STT Proxy URL", type: "text", placeholder: "https://stt.example.com" },
+    { key: "stt_api_key", label: "STT API Key", type: "password" },
+    { key: "stt_tenant_id", label: "STT Tenant ID", type: "text" },
+    { key: "stt_timeout_seconds", label: "STT Timeout (seconds)", type: "number", defaultValue: 30 },
   ],
 };
 

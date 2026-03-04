@@ -3,7 +3,10 @@ package methods
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -119,6 +122,23 @@ func (m *ChannelInstancesMethods) handleCreate(ctx context.Context, client *gate
 	if params.Enabled != nil {
 		enabled = *params.Enabled
 	}
+	if params.ChannelType == "voicebox" && enabled {
+		if err := ensureSingleEnabledVoicebox(ctx, m.store, uuid.Nil); err != nil {
+			if errors.Is(err, errVoiceboxAlreadyEnabled) {
+				client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "only one enabled voicebox instance is supported"))
+				return
+			}
+			slog.Error("channels.instances.create", "error", err)
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "failed to validate voicebox instances"))
+			return
+		}
+	}
+	if params.ChannelType == "voicebox" {
+		if err := validateVoiceboxAuthRaw(params.Config, params.Credentials); err != nil {
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, err.Error()))
+			return
+		}
+	}
 
 	inst := &store.ChannelInstanceData{
 		Name:        params.Name,
@@ -159,6 +179,59 @@ func (m *ChannelInstancesMethods) handleUpdate(ctx context.Context, client *gate
 	if err := json.Unmarshal(params.Updates, &updates); err != nil {
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid updates"))
 		return
+	}
+
+	current, err := m.store.Get(ctx, id)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound, "instance not found"))
+		return
+	}
+
+	nextChannelType := current.ChannelType
+	if v, ok := updates["channel_type"].(string); ok && v != "" {
+		nextChannelType = v
+	}
+	if !isValidChannelType(nextChannelType) {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid channel_type"))
+		return
+	}
+	nextEnabled := current.Enabled
+	if v, ok := updates["enabled"].(bool); ok {
+		nextEnabled = v
+	}
+
+	cfgRaw := []byte(current.Config)
+	if raw, exists, err := rawJSONFromUpdateValue(updates, "config"); err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid config update"))
+		return
+	} else if exists {
+		cfgRaw = raw
+	}
+
+	credsRaw := current.Credentials
+	if raw, exists, err := rawJSONFromUpdateValue(updates, "credentials"); err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid credentials update"))
+		return
+	} else if exists {
+		credsRaw = raw
+	}
+
+	if nextChannelType == "voicebox" && nextEnabled {
+		if err := ensureSingleEnabledVoicebox(ctx, m.store, id); err != nil {
+			if errors.Is(err, errVoiceboxAlreadyEnabled) {
+				client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "only one enabled voicebox instance is supported"))
+				return
+			}
+			slog.Error("channels.instances.update", "error", err)
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "failed to validate voicebox instances"))
+			return
+		}
+	}
+	if nextChannelType == "voicebox" {
+		if err := validateVoiceboxAuthRaw(cfgRaw, credsRaw); err != nil {
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, err.Error()))
+			return
+		}
 	}
 
 	if err := m.store.Update(ctx, id, updates); err != nil {
@@ -245,8 +318,76 @@ func maskInstance(inst store.ChannelInstanceData) map[string]interface{} {
 // isValidChannelType checks if the channel type is supported.
 func isValidChannelType(ct string) bool {
 	switch ct {
-	case "telegram", "discord", "whatsapp", "zalo_oa", "zalo_personal", "feishu":
+	case "telegram", "discord", "whatsapp", "zalo_oa", "zalo_personal", "feishu", "voicebox":
 		return true
 	}
 	return false
 }
+
+func ensureSingleEnabledVoicebox(ctx context.Context, s store.ChannelInstanceStore, excludeID uuid.UUID) error {
+	enabledInstances, err := s.ListEnabled(ctx)
+	if err != nil {
+		return err
+	}
+	for _, inst := range enabledInstances {
+		if inst.ChannelType == "voicebox" && (excludeID == uuid.Nil || inst.ID != excludeID) {
+			return errVoiceboxAlreadyEnabled
+		}
+	}
+	return nil
+}
+
+func rawJSONFromUpdateValue(updates map[string]interface{}, key string) ([]byte, bool, error) {
+	v, ok := updates[key]
+	if !ok {
+		return nil, false, nil
+	}
+	switch t := v.(type) {
+	case json.RawMessage:
+		return t, true, nil
+	case []byte:
+		return t, true, nil
+	case string:
+		return []byte(t), true, nil
+	default:
+		raw, err := json.Marshal(t)
+		return raw, true, err
+	}
+}
+
+func validateVoiceboxAuthRaw(cfgRaw, credsRaw []byte) error {
+	var cfg struct {
+		AuthMode string `json:"auth_mode,omitempty"`
+	}
+	if len(cfgRaw) > 0 {
+		if err := json.Unmarshal(cfgRaw, &cfg); err != nil {
+			return fmt.Errorf("invalid voicebox config")
+		}
+	}
+	switch cfg.AuthMode {
+	case "", "open":
+		return nil
+	case "token":
+		// continue
+	default:
+		return fmt.Errorf("invalid auth_mode: %s", cfg.AuthMode)
+	}
+	if cfg.AuthMode != "token" {
+		return nil
+	}
+
+	var creds struct {
+		SecretKey string `json:"secret_key,omitempty"`
+	}
+	if len(credsRaw) > 0 {
+		if err := json.Unmarshal(credsRaw, &creds); err != nil {
+			return fmt.Errorf("invalid voicebox credentials")
+		}
+	}
+	if strings.TrimSpace(creds.SecretKey) == "" {
+		return fmt.Errorf("secret_key is required when auth_mode=token")
+	}
+	return nil
+}
+
+var errVoiceboxAlreadyEnabled = errors.New("voicebox instance already enabled")

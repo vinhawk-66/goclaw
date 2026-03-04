@@ -15,6 +15,7 @@ flowchart LR
         ZL["Zalo OA"]
         ZLP["Zalo Personal"]
         WA["WhatsApp"]
+        VB["Voicebox"]
     end
 
     subgraph "Channel Layer"
@@ -38,6 +39,7 @@ flowchart LR
     ZL --> CH
     ZLP --> CH
     WA --> CH
+    VB --> CH
     CH --> HM
     HM --> BUS
     BUS --> AGENT
@@ -50,6 +52,7 @@ flowchart LR
     SEND --> ZL
     SEND --> ZLP
     SEND --> WA
+    SEND --> VB
 ```
 
 Internal channels (`cli`, `system`, `subagent`) are silently skipped by the outbound dispatcher and never forwarded to external platforms.
@@ -89,7 +92,7 @@ Every channel must implement the base interface:
 | Interface | Purpose | Implemented By |
 |-----------|---------|----------------|
 | `StreamingChannel` | Real-time streaming updates | Telegram, Feishu |
-| `WebhookChannel` | Webhook HTTP handler mounting | Feishu |
+| `WebhookChannel` | Webhook HTTP handler mounting | Feishu, Voicebox |
 | `ReactionChannel` | Status reactions on messages | Telegram, Feishu |
 
 `BaseChannel` provides a shared implementation that all channels embed: allowlist matching, `HandleMessage()`, `CheckPolicy()`, and user ID extraction.
@@ -101,7 +104,7 @@ Channels implementing `WebhookChannel` expose an HTTP handler that can be mounte
 ```mermaid
 flowchart TD
     GW["Gateway HTTP Mux"] --> WH{"WebhookChannel?"}
-    WH -->|Yes| MOUNT["Mount handler on main mux<br/>(e.g., /feishu/events)"]
+    WH -->|Yes| MOUNT["Mount handler on main mux<br/>(e.g., /feishu/events, /voicebox/v1/)"]
     WH -->|No| SKIP["Channel uses its own transport<br/>(polling, gateway events, etc.)"]
 ```
 
@@ -154,22 +157,22 @@ flowchart TD
 
 ## 4. Channel Comparison
 
-| Feature | Telegram | Feishu/Lark | Discord | WhatsApp | Zalo OA | Zalo Personal |
-|---------|----------|-------------|---------|----------|---------|---------------|
-| Connection | Long polling | WS (default) / Webhook | Gateway events | External WS bridge | Long polling | Internal protocol |
-| DM support | Yes | Yes | Yes | Yes | Yes (DM only) | Yes |
-| Group support | Yes (mention gating) | Yes | Yes | Yes | No | Yes |
-| Forum/Topics | Yes (per-topic config) | Yes (topic session mode) | -- | -- | -- | -- |
-| Message limit | 4,096 chars | Configurable (default 4,000) | 2,000 chars | N/A (bridge) | 2,000 chars | 2,000 chars |
-| Streaming | Typing indicator | Streaming message cards | Edit "Thinking..." | No | No | No |
-| Media | Photos, voice, files | Images, files (30 MB) | Files, embeds | JSON messages | Images (5 MB) | -- |
-| Speech-to-text | Yes (STT proxy) | -- | -- | -- | -- | -- |
-| Voice routing | Yes (VoiceAgentID) | -- | -- | -- | -- | -- |
-| Rich formatting | Markdown → HTML | Card messages | Markdown | Plain text | Plain text | Plain text |
-| Bot commands | 10+ commands | -- | -- | -- | -- | -- |
-| Tool allow list | Per-topic | -- | -- | -- | -- | -- |
-| Pairing support | Yes | Yes | Yes | Yes | Yes | Yes |
-| Status reactions | Yes | Yes | -- | -- | -- | -- |
+| Feature | Telegram | Feishu/Lark | Discord | WhatsApp | Voicebox | Zalo OA | Zalo Personal |
+|---------|----------|-------------|---------|----------|----------|---------|---------------|
+| Connection | Long polling | WS (default) / Webhook | Gateway events | External WS bridge | WS webhook path (`/voicebox/v1/`) | Long polling | Internal protocol |
+| DM support | Yes | Yes | Yes | Yes | Yes (device direct) | Yes (DM only) | Yes |
+| Group support | Yes (mention gating) | Yes | Yes | Yes | No | No | Yes |
+| Forum/Topics | Yes (per-topic config) | Yes (topic session mode) | -- | -- | -- | -- | -- |
+| Message limit | 4,096 chars | Configurable (default 4,000) | 2,000 chars | N/A (bridge) | Audio stream + JSON control events | 2,000 chars | 2,000 chars |
+| Streaming | Typing indicator | Streaming message cards | Edit "Thinking..." | No | Sentence-by-sentence TTS + binary frames | No | No |
+| Media | Photos, voice, files | Images, files (30 MB) | Files, embeds | JSON messages | Opus audio frames | Images (5 MB) | -- |
+| Speech-to-text | Yes (STT proxy) | -- | -- | -- | Yes (STT proxy) | -- | -- |
+| Voice routing | Yes (VoiceAgentID) | -- | -- | -- | Native voice channel | -- | -- |
+| Rich formatting | Markdown → HTML | Card messages | Markdown | Plain text | JSON events (`llm`, `tts`, `stt`, `alert`) | Plain text | Plain text |
+| Bot commands | 10+ commands | -- | -- | -- | -- | -- | -- |
+| Tool allow list | Per-topic | -- | -- | -- | -- | -- | -- |
+| Pairing support | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Status reactions | Yes | Yes | -- | -- | -- | -- | -- |
 
 ---
 
@@ -399,7 +402,40 @@ The WhatsApp channel communicates through an external WebSocket bridge (e.g., wh
 
 ---
 
-## 9. Zalo OA
+## 9. Voicebox
+
+The Voicebox channel provides a xiaozhi-esp32 compatible voice protocol over WebSocket. Devices connect to `/voicebox/v1/` and keep a single long-lived session per device ID.
+
+### Key Behaviors
+
+- **Handshake**: Client sends JSON `hello`, server replies with `hello` including `session_id` and output audio params (24kHz, 60ms frame duration).
+- **Protocol versions**: Supports binary frame v1/v2/v3 (`Protocol-Version` header), plus optional MQTT gateway envelope stripping (`from=mqtt_gateway`).
+- **Listen flow**: `listen(start|detect)` enables capture, audio binary frames are buffered, `listen(stop)` triggers STT and publishes text to the agent loop.
+- **TTS flow**: Outbound replies send `llm(emotion)` + `tts(start)` + `tts(sentence_start)` events and stream binary Opus frames, then `tts(stop)`.
+- **Abort**: Incoming `abort` cancels in-flight TTS playback immediately.
+- **DM policy default**: `pairing` (secure by default). `allowlist`, `open`, and `disabled` are also supported.
+- **Auth modes**: `open` or HMAC `token`. In token mode, `secret_key` is required and failures log `security.voicebox.auth_failed`.
+- **Origin policy**: WebSocket upgrade allows empty `Origin` (embedded devices) or same-host origin only.
+- **Singleton enabled instance**: Managed mode enforces at most one enabled Voicebox instance (API validation + DB partial unique index).
+
+### Configuration (Managed Channel Instance)
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `dm_policy` | `pairing` | `pairing`, `allowlist`, `open`, `disabled` |
+| `auth_mode` | `open` | `open` or `token` |
+| `token_expiry` | `2592000` | Token expiry in seconds (30 days default) |
+| `allowed_devices` | -- | Token bypass allowlist for specific `device_id` values |
+| `allow_from` | -- | Allowlist used when `dm_policy=allowlist` |
+| `stt_proxy_url` | -- | STT proxy endpoint (`/transcribe_audio` is auto-appended when needed) |
+| `stt_api_key` | -- | Bearer token for STT proxy |
+| `stt_tenant_id` | -- | Optional tenant ID forwarded to STT proxy |
+| `stt_timeout_seconds` | `30` | STT request timeout |
+| `credentials.secret_key` | -- | Required when `auth_mode=token` |
+
+---
+
+## 10. Zalo OA
 
 The Zalo OA (Official Account) channel connects to the Zalo OA Bot API.
 
@@ -414,7 +450,7 @@ The Zalo OA (Official Account) channel connects to the Zalo OA Bot API.
 
 ---
 
-## 10. Zalo Personal
+## 11. Zalo Personal
 
 The Zalo Personal channel provides access to personal Zalo accounts using a reverse-engineered protocol. This is an unofficial integration.
 
@@ -443,7 +479,7 @@ Zalo Personal uses an unofficial, reverse-engineered protocol. The account used 
 
 ---
 
-## 11. Channel-Isolated Workspaces
+## 12. Channel-Isolated Workspaces
 
 Each channel instance can target a specific agent, providing workspace isolation across channels.
 
@@ -462,7 +498,7 @@ In managed mode, channel instances are loaded from the database with their assig
 
 ---
 
-## 12. Local Key Propagation
+## 13. Local Key Propagation
 
 Thread/topic context is preserved through the entire message pipeline using a `local_key` in message metadata. This ensures subagent, delegation, and team message results land in the correct thread — not the root chat.
 
@@ -473,12 +509,13 @@ Thread/topic context is preserved through the entire message pipeline using a `l
 | Telegram (thread) | `"-12345:thread:55"` |
 | Feishu (chat) | `"oc_xyz"` |
 | Feishu (topic) | `"oc_xyz:topic:{root_msg_id}"` |
+| Voicebox (device) | `"AA:BB:CC:DD:EE:FF"` |
 
 All channel state — placeholders, streams, reactions, typing controllers, thread IDs — is keyed by this composite `local_key`. When delegation or team messages complete, the `local_key` from the original message is preserved in metadata and used to route the response back to the correct location.
 
 ---
 
-## 13. Managed Mode Behavior
+## 14. Managed Mode Behavior
 
 In managed mode, channels provide per-user isolation through compound sender IDs and context propagation:
 
@@ -489,7 +526,7 @@ In managed mode, channels provide per-user isolation through compound sender IDs
 
 ---
 
-## 14. Pairing System
+## 15. Pairing System
 
 The pairing system provides a DM authentication flow for channels using the `pairing` DM policy.
 
@@ -541,9 +578,14 @@ flowchart TD
 | `internal/channels/feishu/bot_policy.go` | Policy evaluation |
 | `internal/channels/discord/discord.go` | Discord: gateway events, placeholder editing |
 | `internal/channels/whatsapp/whatsapp.go` | WhatsApp: external WS bridge |
+| `internal/channels/voicebox/channel.go` | Voicebox core channel, websocket upgrader, policy gates, webhook endpoint |
+| `internal/channels/voicebox/handler.go` | Voicebox connection lifecycle, hello handshake, read loop |
+| `internal/channels/voicebox/protocol.go` | Voicebox v1/v2/v3 binary frame parsing/building |
+| `internal/channels/voicebox/auth.go` | HMAC token verification and generation |
 | `internal/channels/zalo/zalo.go` | Zalo OA: Bot API, long polling |
 | `internal/channels/zalo/personal/channel.go` | Zalo Personal: reverse-engineered protocol |
 | `internal/pairing/service.go` | Pairing: code generation, approval, persistence |
+| `migrations/000009_voicebox_single_enabled.up.sql` | Enforce single enabled Voicebox instance in managed mode |
 | `cmd/gateway_consumer.go` | Message routing: prefixes, handoff, cancel interception |
 
 ---

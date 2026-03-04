@@ -16,6 +16,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/channels/discord"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/feishu"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/telegram"
+	"github.com/nextlevelbuilder/goclaw/internal/channels/voicebox"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/whatsapp"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/zalo"
 	zalopersonal "github.com/nextlevelbuilder/goclaw/internal/channels/zalo/personal"
@@ -193,6 +194,7 @@ func runGateway() {
 
 	// TTS (text-to-speech) system
 	ttsMgr := setupTTS(cfg)
+	voicebox.SetTTSManager(ttsMgr)
 	if ttsMgr != nil {
 		toolsReg.Register(tools.NewTtsTool(ttsMgr))
 		slog.Info("tts enabled", "provider", ttsMgr.PrimaryProvider(), "auto", string(ttsMgr.AutoMode()))
@@ -708,6 +710,7 @@ func runGateway() {
 		instanceLoader.RegisterFactory("zalo_oa", zalo.Factory)
 		instanceLoader.RegisterFactory("zalo_personal", zalopersonal.Factory)
 		instanceLoader.RegisterFactory("whatsapp", whatsapp.Factory)
+		instanceLoader.RegisterFactory("voicebox", voicebox.Factory)
 		if err := instanceLoader.LoadAll(context.Background()); err != nil {
 			slog.Error("failed to load channel instances from DB", "error", err)
 		}
@@ -986,7 +989,13 @@ func runGateway() {
 
 	// Mount channel webhook handlers on the main mux (e.g. Feishu /feishu/events).
 	// This allows webhook-based channels to share the main server port.
+	seenWebhookPaths := make(map[string]struct{})
 	for _, route := range channelMgr.WebhookHandlers() {
+		if _, exists := seenWebhookPaths[route.Path]; exists {
+			slog.Warn("duplicate webhook route skipped", "path", route.Path)
+			continue
+		}
+		seenWebhookPaths[route.Path] = struct{}{}
 		mux.Handle(route.Path, route.Handler)
 		slog.Info("webhook route mounted on gateway", "path", route.Path)
 	}

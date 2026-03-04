@@ -17,7 +17,7 @@ A Go port of [OpenClaw](https://github.com/openclaw/openclaw) with enhanced secu
 - **Single Binary** — ~25 MB static Go binary, no Node.js runtime, <1s startup, runs on a $5 VPS
 - **Production Security** — 5-layer defense: rate limiting, prompt injection detection, SSRF protection, shell deny patterns, AES-256-GCM encryption
 - **13+ LLM Providers** — Anthropic (native HTTP+SSE with prompt caching), OpenAI, OpenRouter, Groq, DeepSeek, Gemini, Mistral, xAI, MiniMax, Cohere, Perplexity, DashScope (Qwen), Bailian Coding
-- **6 Messaging Channels** — Telegram (forum topics, STT), Discord, Zalo OA, Zalo Personal (DM + groups), Feishu/Lark (streaming cards, media), WhatsApp with `/stop` and `/stopall` commands
+- **7 Messaging Channels** — Telegram (forum topics, STT), Discord, Zalo OA, Zalo Personal (DM + groups), Feishu/Lark (streaming cards, media), WhatsApp, and Voicebox (xiaozhi-compatible WebSocket voice protocol with STT/TTS)
 - **Extended Thinking** — Per-provider thinking mode (Anthropic budget tokens, OpenAI reasoning effort, DashScope thinking budget) with streaming support
 
 ## Claw Ecosystem
@@ -49,7 +49,7 @@ A Go port of [OpenClaw](https://github.com/openclaw/openclaw) with enhanced secu
 | Prompt caching             | —                                    | —                                            | —                                     | ✅ Anthropic + OpenAI-compat   |
 | Skill system               | ✅ Embeddings/semantic               | ✅ SKILL.md + TOML                           | ✅ Basic                              | ✅ BM25 + pgvector hybrid      |
 | Lane-based scheduler       | ✅                                   | Bounded concurrency                          | —                                     | ✅ (main/subagent/delegate/cron + concurrent group runs) |
-| Messaging channels         | 37+                                  | 15+                                          | 10+                                   | 6+                             |
+| Messaging channels         | 37+                                  | 15+                                          | 10+                                   | 7+                             |
 | Companion apps             | macOS, iOS, Android                  | Python SDK                                   | —                                     | Web dashboard                  |
 | Live Canvas / Voice        | ✅ (A2UI + TTS/STT)                  | —                                            | Voice transcription                   | TTS (4 providers)              |
 | LLM providers              | 10+                                  | 8 native + 29 compat                         | 13+                                   | **13+**                        |
@@ -69,6 +69,8 @@ graph TB
         FS["Feishu/Lark"]
         ZL["Zalo OA"]
         ZLP["Zalo Personal"]
+        WA["WhatsApp"]
+        VB["Voicebox"]
         API["HTTP API"]
     end
 
@@ -89,7 +91,7 @@ graph TB
     end
 
     WEB --> WS
-    TG & DC & FS & ZL & ZLP --> CM
+    TG & DC & FS & ZL & ZLP & WA & VB --> CM
     API --> REST
     LOOP --> FILE & PG
 ```
@@ -320,6 +322,7 @@ Quality gates validate agent output before it reaches users. Configured in agent
 ### Messaging Channels
 - **Telegram** — Full integration with streaming, rich formatting (HTML, tables, code blocks), reactions, media, forum topics (per-topic config and session isolation), speech-to-text, bot commands, group file writer restrictions
 - **Feishu/Lark** — Streaming card updates, media attachments (images/files), mention resolution, topic session mode
+- **Voicebox** — XiaoZhi-compatible voice channel (`/voicebox/v1/`) with hello handshake, protocol v1/v2/v3 binary frames, STT proxy ingress, and TTS audio streaming egress
 - **Zalo OA** — Official Account integration for DM conversations
 - **Zalo Personal** — Unofficial reverse-engineered protocol supporting DM + group messages with restrictive default policies
 - **Discord, WhatsApp** — Channel adapters with `/stop` and `/stopall` commands
@@ -964,7 +967,7 @@ GOCLAW_OPENROUTER_API_KEY=sk-or-xxx go test -v ./tests/integration/ -timeout 120
 - **Evaluate loop** — Generator-evaluator feedback cycles with configurable max rounds and pass criteria. Implementation complete, needs E2E testing.
 - **Quality gates** — Hook-based output validation with command and agent evaluator types. Implementation complete, needs E2E testing.
 - **Delegation history** — Queryable audit trail of inter-agent delegations. Implementation complete, needs validation at scale.
-- **Other messaging channels** — Discord, Zalo OA, Zalo Personal, Feishu/Lark, WhatsApp channel adapters are implemented but have not been tested end-to-end in production. Only Telegram has been validated with real users.
+- **Other messaging channels** — Discord, Zalo OA, Zalo Personal, Feishu/Lark, WhatsApp, and Voicebox channel adapters are implemented but have not been tested end-to-end in production. Only Telegram has been validated with real users.
 - **Skill system** — BM25 search, ZIP upload, SKILL.md parsing, and embedding hybrid search are implemented. Basic functionality verified but no full E2E flow testing with real agent usage.
 - **Custom tools (runtime API)** — Shell-based custom tools with JSON Schema params, encrypted env vars, and HTTP CRUD are implemented. Not yet tested in a production workflow.
 - **MCP integration** — stdio, SSE, and streamable-http transports with per-agent/per-user grants implemented. Not tested with real MCP servers in production.

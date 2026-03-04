@@ -22,6 +22,7 @@ flowchart TD
         ZL[Zalo OA]
         ZLP[Zalo Personal]
         WA[WhatsApp]
+        VB[Voicebox]
     end
 
     subgraph Gateway["Gateway Server"]
@@ -88,7 +89,7 @@ flowchart TD
 
     WS --> WSS
     HTTP --> HTTPS
-    TG & DC & FS & ZL & ZLP & WA --> CM
+    TG & DC & FS & ZL & ZLP & WA & VB --> CM
 
     WSS --> MR
     HTTPS --> MR
@@ -125,7 +126,7 @@ flowchart TD
 | `internal/bootstrap/` | System prompt files (AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md, HEARTBEAT.md, BOOTSTRAP.md) + seeding + truncation |
 | `internal/config/` | Config loading (JSON5) + env var overlay |
 | `internal/skills/` | SKILL.md loader (5-tier hierarchy) + BM25 search + hot-reload via fsnotify |
-| `internal/channels/` | Channel manager + adapters: Telegram (forum topics, STT, bot commands), Feishu/Lark (streaming cards, media), Zalo OA, Zalo Personal, Discord, WhatsApp |
+| `internal/channels/` | Channel manager + adapters: Telegram (forum topics, STT, bot commands), Feishu/Lark (streaming cards, media), Voicebox (xiaozhi-compatible WebSocket voice protocol), Zalo OA, Zalo Personal, Discord, WhatsApp |
 | `internal/mcp/` | MCP server bridge (stdio, SSE, streamable-HTTP transports) |
 | `internal/scheduler/` | Lane-based concurrency control (main, subagent, cron, delegate lanes) with per-session serialization |
 | `internal/memory/` | Memory system (SQLite FTS5 + embeddings for standalone mode) |
@@ -267,7 +268,7 @@ sequenceDiagram
 
     GW->>Engine: 17. Create gateway server (WS + HTTP)
     GW->>Engine: 18. Register RPC methods
-    GW->>Engine: 19. Register + start channels (Telegram, Discord, Feishu, Zalo, WhatsApp)
+    GW->>Engine: 19. Register + start channels (Telegram, Discord, Feishu, Voicebox, Zalo, WhatsApp)
     GW->>Engine: 20. Start cron, heartbeat, scheduler (4 lanes)
     GW->>Engine: 21. Start skills watcher + inbound consumer
     GW->>Engine: 22. Listen on host:port

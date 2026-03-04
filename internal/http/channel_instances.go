@@ -1,10 +1,14 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -147,6 +151,23 @@ func (h *ChannelInstancesHandler) handleCreate(w http.ResponseWriter, r *http.Re
 	if body.Enabled != nil {
 		enabled = *body.Enabled
 	}
+	if body.ChannelType == "voicebox" && enabled {
+		if err := ensureSingleEnabledVoiceboxHTTP(r.Context(), h.store, uuid.Nil); err != nil {
+			if errors.Is(err, errVoiceboxAlreadyEnabledHTTP) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "only one enabled voicebox instance is supported"})
+				return
+			}
+			slog.Error("channel_instances.create", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to validate voicebox instances"})
+			return
+		}
+	}
+	if body.ChannelType == "voicebox" {
+		if err := validateVoiceboxAuthRawHTTP(body.Config, body.Credentials); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
 
 	userID := store.UserIDFromContext(r.Context())
 
@@ -198,6 +219,59 @@ func (h *ChannelInstancesHandler) handleUpdate(w http.ResponseWriter, r *http.Re
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&updates); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
+	}
+
+	current, err := h.store.Get(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "instance not found"})
+		return
+	}
+
+	nextChannelType := current.ChannelType
+	if v, ok := updates["channel_type"].(string); ok && v != "" {
+		nextChannelType = v
+	}
+	if !isValidChannelType(nextChannelType) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid channel_type"})
+		return
+	}
+	nextEnabled := current.Enabled
+	if v, ok := updates["enabled"].(bool); ok {
+		nextEnabled = v
+	}
+
+	cfgRaw := []byte(current.Config)
+	if raw, exists, err := rawJSONFromUpdateValueHTTP(updates, "config"); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid config update"})
+		return
+	} else if exists {
+		cfgRaw = raw
+	}
+
+	credsRaw := current.Credentials
+	if raw, exists, err := rawJSONFromUpdateValueHTTP(updates, "credentials"); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid credentials update"})
+		return
+	} else if exists {
+		credsRaw = raw
+	}
+
+	if nextChannelType == "voicebox" && nextEnabled {
+		if err := ensureSingleEnabledVoiceboxHTTP(r.Context(), h.store, id); err != nil {
+			if errors.Is(err, errVoiceboxAlreadyEnabledHTTP) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "only one enabled voicebox instance is supported"})
+				return
+			}
+			slog.Error("channel_instances.update", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to validate voicebox instances"})
+			return
+		}
+	}
+	if nextChannelType == "voicebox" {
+		if err := validateVoiceboxAuthRawHTTP(cfgRaw, credsRaw); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	if err := h.store.Update(r.Context(), id, updates); err != nil {
@@ -378,8 +452,76 @@ func (h *ChannelInstancesHandler) handleRemoveWriter(w http.ResponseWriter, r *h
 // isValidChannelType checks if the channel type is supported.
 func isValidChannelType(ct string) bool {
 	switch ct {
-	case "telegram", "discord", "whatsapp", "zalo_oa", "zalo_personal", "feishu":
+	case "telegram", "discord", "whatsapp", "zalo_oa", "zalo_personal", "feishu", "voicebox":
 		return true
 	}
 	return false
 }
+
+func ensureSingleEnabledVoiceboxHTTP(ctx context.Context, s store.ChannelInstanceStore, excludeID uuid.UUID) error {
+	enabledInstances, err := s.ListEnabled(ctx)
+	if err != nil {
+		return err
+	}
+	for _, inst := range enabledInstances {
+		if inst.ChannelType == "voicebox" && (excludeID == uuid.Nil || inst.ID != excludeID) {
+			return errVoiceboxAlreadyEnabledHTTP
+		}
+	}
+	return nil
+}
+
+func rawJSONFromUpdateValueHTTP(updates map[string]interface{}, key string) ([]byte, bool, error) {
+	v, ok := updates[key]
+	if !ok {
+		return nil, false, nil
+	}
+	switch t := v.(type) {
+	case json.RawMessage:
+		return t, true, nil
+	case []byte:
+		return t, true, nil
+	case string:
+		return []byte(t), true, nil
+	default:
+		raw, err := json.Marshal(t)
+		return raw, true, err
+	}
+}
+
+func validateVoiceboxAuthRawHTTP(cfgRaw, credsRaw []byte) error {
+	var cfg struct {
+		AuthMode string `json:"auth_mode,omitempty"`
+	}
+	if len(cfgRaw) > 0 {
+		if err := json.Unmarshal(cfgRaw, &cfg); err != nil {
+			return fmt.Errorf("invalid voicebox config")
+		}
+	}
+	switch cfg.AuthMode {
+	case "", "open":
+		return nil
+	case "token":
+		// continue
+	default:
+		return fmt.Errorf("invalid auth_mode: %s", cfg.AuthMode)
+	}
+	if cfg.AuthMode != "token" {
+		return nil
+	}
+
+	var creds struct {
+		SecretKey string `json:"secret_key,omitempty"`
+	}
+	if len(credsRaw) > 0 {
+		if err := json.Unmarshal(credsRaw, &creds); err != nil {
+			return fmt.Errorf("invalid voicebox credentials")
+		}
+	}
+	if strings.TrimSpace(creds.SecretKey) == "" {
+		return fmt.Errorf("secret_key is required when auth_mode=token")
+	}
+	return nil
+}
+
+var errVoiceboxAlreadyEnabledHTTP = errors.New("voicebox instance already enabled")
