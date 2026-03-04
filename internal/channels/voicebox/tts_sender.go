@@ -106,21 +106,39 @@ func (s *TTSSender) Cancel() {
 	}
 }
 
-func (s *TTSSender) sendAudio(opus []byte) error {
-	if len(opus) == 0 {
+func (s *TTSSender) sendAudio(audio []byte) error {
+	if len(audio) == 0 {
 		return nil
 	}
 	if s.sendBinary == nil {
 		return nil
 	}
 
-	for start := 0; start < len(opus); start += opusChunkSizeBytes {
-		end := start + opusChunkSizeBytes
-		if end > len(opus) {
-			end = len(opus)
+	// OGG container detected — demux to extract raw Opus packets.
+	// All TTS providers (OpenAI, ElevenLabs, Edge) return OGG-wrapped Opus,
+	// but ESP32 xiaozhi firmware expects raw Opus frames.
+	if len(audio) >= 4 && string(audio[:4]) == "OggS" {
+		packets, err := ExtractOpusPackets(audio)
+		if err != nil {
+			slog.Warn("voicebox: ogg demux failed, falling back to raw chunking", "error", err)
+		} else {
+			for _, pkt := range packets {
+				frame := BuildBinaryFrame(pkt, s.protocolVersion, s.nextTimestamp())
+				if err := s.sendBinary(frame); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
-		chunk := opus[start:end]
-		frame := BuildBinaryFrame(chunk, s.protocolVersion, s.nextTimestamp())
+	}
+
+	// Raw audio fallback: chunk at fixed boundaries.
+	for start := 0; start < len(audio); start += opusChunkSizeBytes {
+		end := start + opusChunkSizeBytes
+		if end > len(audio) {
+			end = len(audio)
+		}
+		frame := BuildBinaryFrame(audio[start:end], s.protocolVersion, s.nextTimestamp())
 		if err := s.sendBinary(frame); err != nil {
 			return err
 		}

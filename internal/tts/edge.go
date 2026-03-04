@@ -1,6 +1,7 @@
 package tts
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -46,9 +47,9 @@ func NewEdgeProvider(cfg EdgeConfig) *EdgeProvider {
 func (p *EdgeProvider) Name() string { return "edge" }
 
 // Synthesize runs the edge-tts CLI to generate audio.
-// Output is always MP3 (edge-tts default format: audio-24khz-48kbitrate-mono-mp3).
-func (p *EdgeProvider) Synthesize(ctx context.Context, text string, _ Options) (*SynthResult, error) {
-	// Create temp file for output
+// Edge TTS natively outputs MP3. When opts.Format is "opus", the MP3 is
+// converted to Opus via ffmpeg (must be installed on the host).
+func (p *EdgeProvider) Synthesize(ctx context.Context, text string, opts Options) (*SynthResult, error) {
 	tmpDir := os.TempDir()
 	outPath := filepath.Join(tmpDir, fmt.Sprintf("tts-%d.mp3", time.Now().UnixNano()))
 	defer os.Remove(outPath)
@@ -76,9 +77,48 @@ func (p *EdgeProvider) Synthesize(ctx context.Context, text string, _ Options) (
 		return nil, fmt.Errorf("read edge-tts output: %w", err)
 	}
 
+	// Convert MP3→Opus via ffmpeg when opus format is requested (e.g. voicebox channel).
+	// Use fresh timeout for ffmpeg — don't reuse cmdCtx which may have little time left.
+	if opts.Format == "opus" {
+		ffCtx, ffCancel := context.WithTimeout(ctx, 15*time.Second)
+		defer ffCancel()
+		audio, err = convertMP3ToOpus(ffCtx, audio)
+		if err != nil {
+			return nil, fmt.Errorf("edge-tts opus conversion: %w", err)
+		}
+		return &SynthResult{
+			Audio:     audio,
+			Extension: "opus",
+			MimeType:  "audio/ogg",
+		}, nil
+	}
+
 	return &SynthResult{
 		Audio:     audio,
 		Extension: "mp3",
 		MimeType:  "audio/mpeg",
 	}, nil
+}
+
+// convertMP3ToOpus pipes MP3 bytes through ffmpeg to produce OGG/Opus output.
+func convertMP3ToOpus(ctx context.Context, mp3 []byte) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-i", "pipe:0", // read MP3 from stdin
+		"-c:a", "libopus",
+		"-b:a", "48k",
+		"-ar", "24000",
+		"-ac", "1",
+		"-f", "ogg",
+		"pipe:1", // write Opus to stdout
+	)
+	cmd.Stdin = bytes.NewReader(mp3)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg mp3→opus: %w (stderr: %s)", err, stderr.String())
+	}
+	return out, nil
 }
