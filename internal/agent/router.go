@@ -37,6 +37,14 @@ func NewRouter() *Router {
 	}
 }
 
+// DisableTTL turns off cache expiration so registered agents persist indefinitely.
+// Use in standalone mode where agents are eagerly created and never refreshed from DB.
+func (r *Router) DisableTTL() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ttl = 0
+}
+
 // SetResolver sets a resolver function for lazy agent creation (managed mode).
 func (r *Router) SetResolver(fn ResolverFunc) {
 	r.mu.Lock()

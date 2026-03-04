@@ -584,6 +584,10 @@ func runGateway() {
 	// In managed mode, agents are created lazily by the resolver (from DB).
 	// In standalone mode, create agents eagerly from config.
 	if !isManaged {
+		// Standalone: agents are eagerly created and never refreshed from DB.
+		// Disable TTL so they persist indefinitely in the router cache.
+		agentRouter.DisableTTL()
+
 		// Always create "default" agent
 		if err := createAgentLoop("default", cfg, agentRouter, providerRegistry, msgBus, sessStore, toolsReg, toolPE, contextFiles, skillsLoader, hasMemory, sandboxMgr, fileAgentStore, ensureUserFiles, contextFileLoader); err != nil {
 			slog.Error("failed to create default agent", "error", err)
