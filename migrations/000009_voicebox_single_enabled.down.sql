@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_channel_instances_voicebox_single_enabled;
