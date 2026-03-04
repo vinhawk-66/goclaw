@@ -134,6 +134,16 @@ export function ChannelInstanceFormDialog({
       }
     }
 
+    if (channelType === "voicebox") {
+      const authMode = String(configValues.auth_mode ?? "");
+      const secretKey = String(credsValues.secret_key ?? "").trim();
+      const hasStoredSecret = !!instance?.has_credentials;
+      if (authMode === "token" && !secretKey && !hasStoredSecret) {
+        setError("Secret Key is required when Auth Mode is Token (HMAC)");
+        return;
+      }
+    }
+
     const cleanConfig = Object.fromEntries(
       Object.entries(configValues).filter(([, v]) => v !== undefined && v !== "" && v !== null),
     );
