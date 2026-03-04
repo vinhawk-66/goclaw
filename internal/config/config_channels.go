@@ -9,6 +9,7 @@ type ChannelsConfig struct {
 	Zalo         ZaloConfig         `json:"zalo"`
 	ZaloPersonal ZaloPersonalConfig `json:"zalo_personal"`
 	Feishu       FeishuConfig       `json:"feishu"`
+	Voicebox     VoiceboxConfig     `json:"voicebox"`
 }
 
 type TelegramConfig struct {
@@ -115,8 +116,7 @@ type ZaloPersonalConfig struct {
 	CredentialsPath string              `json:"credentials_path,omitempty"` // path to saved cookies JSON (standalone)
 }
 
-type FeishuConfig struct {
-	Enabled           bool                `json:"enabled"`
+type FeishuConfig struct {	Enabled           bool                `json:"enabled"`
 	AppID             string              `json:"app_id"`
 	AppSecret         string              `json:"app_secret"`
 	EncryptKey        string              `json:"encrypt_key,omitempty"`
@@ -137,6 +137,21 @@ type FeishuConfig struct {
 	Streaming         *bool               `json:"streaming,omitempty"`          // default true
 	ReactionLevel     string              `json:"reaction_level,omitempty"`     // "off" (default), "minimal", "full" — typing emoji reactions
 	HistoryLimit      int                 `json:"history_limit,omitempty"`
+}
+
+// VoiceboxConfig configures the voicebox channel for ESP32 voice devices (standalone mode).
+type VoiceboxConfig struct {
+	Enabled           bool                `json:"enabled"`
+	AllowFrom         FlexibleStringSlice `json:"allow_from"`
+	DMPolicy          string              `json:"dm_policy,omitempty"`          // "open" (default), "pairing", "allowlist", "disabled"
+	AuthMode          string              `json:"auth_mode,omitempty"`          // "" (none) or "token" (HMAC-SHA256)
+	SecretKey         string              `json:"secret_key,omitempty"`         // required when auth_mode=token
+	TokenExpiry       int64               `json:"token_expiry,omitempty"`       // token TTL in seconds (default 3600)
+	AllowedDevices    []string            `json:"allowed_devices,omitempty"`    // device allowlist for token auth
+	STTProxyURL       string              `json:"stt_proxy_url,omitempty"`      // STT transcription endpoint
+	STTAPIKey         string              `json:"stt_api_key,omitempty"`        // STT Bearer token
+	STTTenantID       string              `json:"stt_tenant_id,omitempty"`      // STT tenant identifier
+	STTTimeoutSeconds int                 `json:"stt_timeout_seconds,omitempty"` // per-request STT timeout (default 30s)
 }
 
 // ProvidersConfig maps provider name to its config.

@@ -778,6 +778,20 @@ func runGateway() {
 		}
 	}
 
+	if cfg.Channels.Voicebox.Enabled && instanceLoader == nil {
+		vbCfg := cfg.Channels.Voicebox
+		var auth *voicebox.TokenAuth
+		if vbCfg.AuthMode == "token" && vbCfg.SecretKey != "" {
+			auth = voicebox.NewTokenAuth(vbCfg.SecretKey, vbCfg.TokenExpiry, vbCfg.AllowedDevices)
+		}
+		vb := voicebox.New(voicebox.ChannelConfig{
+			DMPolicy:  vbCfg.DMPolicy,
+			AllowFrom: []string(vbCfg.AllowFrom),
+		}, msgBus, pairingStore, auth, voicebox.NewSTTProxy(vbCfg.STTProxyURL, vbCfg.STTAPIKey, vbCfg.STTTenantID, vbCfg.STTTimeoutSeconds))
+		channelMgr.RegisterChannel("voicebox", vb)
+		slog.Info("voicebox channel enabled (config)")
+	}
+
 	// TODO: create_forum_topic tool — disabled for now, re-enable when needed.
 	// toolsReg.Register(tools.NewCreateForumTopicTool(func() tools.ForumTopicCreator {
 	// 	for _, name := range channelMgr.GetEnabledChannels() {
