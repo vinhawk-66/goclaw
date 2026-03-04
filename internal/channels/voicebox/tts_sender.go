@@ -120,16 +120,16 @@ func (s *TTSSender) sendAudio(audio []byte) error {
 	if len(audio) >= 4 && string(audio[:4]) == "OggS" {
 		packets, err := ExtractOpusPackets(audio)
 		if err != nil {
-			slog.Warn("voicebox: ogg demux failed, falling back to raw chunking", "error", err)
-		} else {
-			for _, pkt := range packets {
-				frame := BuildBinaryFrame(pkt, s.protocolVersion, s.nextTimestamp())
-				if err := s.sendBinary(frame); err != nil {
-					return err
-				}
-			}
+			slog.Warn("voicebox: ogg demux failed, skipping audio", "error", err)
 			return nil
 		}
+		for _, pkt := range packets {
+			frame := BuildBinaryFrame(pkt, s.protocolVersion, s.nextTimestamp())
+			if err := s.sendBinary(frame); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	// Raw audio fallback: chunk at fixed boundaries.

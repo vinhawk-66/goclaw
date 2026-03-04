@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"time"
 )
 
@@ -50,8 +49,12 @@ func (p *EdgeProvider) Name() string { return "edge" }
 // Edge TTS natively outputs MP3. When opts.Format is "opus", the MP3 is
 // converted to Opus via ffmpeg (must be installed on the host).
 func (p *EdgeProvider) Synthesize(ctx context.Context, text string, opts Options) (*SynthResult, error) {
-	tmpDir := os.TempDir()
-	outPath := filepath.Join(tmpDir, fmt.Sprintf("tts-%d.mp3", time.Now().UnixNano()))
+	outFile, err := os.CreateTemp("", "tts-*.mp3")
+	if err != nil {
+		return nil, fmt.Errorf("edge-tts: create temp file: %w", err)
+	}
+	outPath := outFile.Name()
+	outFile.Close()
 	defer os.Remove(outPath)
 
 	args := []string{
