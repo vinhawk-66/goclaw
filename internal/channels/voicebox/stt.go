@@ -21,11 +21,12 @@ const (
 type STTProxy struct {
 	endpoint       string
 	apiKey         string
+	model          string
 	tenantID       string
 	timeoutSeconds int
 }
 
-func NewSTTProxy(endpoint, apiKey, tenantID string, timeoutSeconds int) *STTProxy {
+func NewSTTProxy(endpoint, apiKey, model, tenantID string, timeoutSeconds int) *STTProxy {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
 		return nil
@@ -33,9 +34,14 @@ func NewSTTProxy(endpoint, apiKey, tenantID string, timeoutSeconds int) *STTProx
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = defaultSTTTimeoutSeconds
 	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = "whisper-large-v3-turbo"
+	}
 	return &STTProxy{
 		endpoint:       endpoint,
 		apiKey:         strings.TrimSpace(apiKey),
+		model:          model,
 		tenantID:       strings.TrimSpace(tenantID),
 		timeoutSeconds: timeoutSeconds,
 	}
@@ -64,6 +70,9 @@ func (s *STTProxy) Transcribe(ctx context.Context, audio []byte) (string, error)
 		if err := w.WriteField("tenant_id", s.tenantID); err != nil {
 			return "", fmt.Errorf("stt: write tenant_id: %w", err)
 		}
+	}
+	if err := w.WriteField("model", s.model); err != nil {
+		return "", fmt.Errorf("stt: write model: %w", err)
 	}
 	if err := w.Close(); err != nil {
 		return "", fmt.Errorf("stt: finalize multipart: %w", err)

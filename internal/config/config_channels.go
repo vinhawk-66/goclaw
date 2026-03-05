@@ -149,6 +149,7 @@ type VoiceboxConfig struct {
 	AllowedDevices    []string            `json:"allowed_devices,omitempty"`    // device allowlist for token auth
 	STTProxyURL       string              `json:"stt_proxy_url,omitempty"`      // STT transcription endpoint
 	STTAPIKey         string              `json:"stt_api_key,omitempty"`        // STT Bearer token
+	STTModel          string              `json:"stt_model,omitempty"`          // STT model name (default: whisper-large-v3-turbo)
 	STTTenantID       string              `json:"stt_tenant_id,omitempty"`      // STT tenant identifier
 	STTTimeoutSeconds int                 `json:"stt_timeout_seconds,omitempty"` // per-request STT timeout (default 30s)
 }

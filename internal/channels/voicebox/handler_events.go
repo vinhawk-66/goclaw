@@ -73,13 +73,19 @@ func (h *Handler) handleListen(ctx context.Context, msg ListenMessage) {
 	case "stop":
 		h.listening = false
 		h.session.Transition(StateIdle)
-		audio := h.audio.Bytes()
+		packets := h.audio.Packets()
 		h.audio.Reset()
-		go h.transcribeAndPublish(ctx, audio)
+		go h.transcribeAndPublish(ctx, packets)
 	}
 }
 
-func (h *Handler) transcribeAndPublish(ctx context.Context, audio []byte) {
+func (h *Handler) transcribeAndPublish(ctx context.Context, packets [][]byte) {
+	if len(packets) == 0 {
+		return
+	}
+	// ESP32 sends raw Opus frames at 16kHz mono, 60ms per frame.
+	// Wrap into OGG/Opus container for STT API compatibility.
+	audio := WrapOpusInOGG(packets, 16000, 1, 60)
 	if len(audio) == 0 {
 		return
 	}

@@ -791,7 +791,7 @@ func runGateway() {
 		vb := voicebox.New(voicebox.ChannelConfig{
 			DMPolicy:  vbCfg.DMPolicy,
 			AllowFrom: []string(vbCfg.AllowFrom),
-		}, msgBus, pairingStore, auth, voicebox.NewSTTProxy(vbCfg.STTProxyURL, vbCfg.STTAPIKey, vbCfg.STTTenantID, vbCfg.STTTimeoutSeconds))
+		}, msgBus, pairingStore, auth, voicebox.NewSTTProxy(vbCfg.STTProxyURL, vbCfg.STTAPIKey, vbCfg.STTModel, vbCfg.STTTenantID, vbCfg.STTTimeoutSeconds))
 		channelMgr.RegisterChannel("voicebox", vb)
 		slog.Info("voicebox channel enabled (config)")
 	}

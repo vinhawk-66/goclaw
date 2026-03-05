@@ -24,6 +24,7 @@ type voiceboxInstanceConfig struct {
 	AllowedDevices    []string `json:"allowed_devices,omitempty"`
 	STTProxyURL       string   `json:"stt_proxy_url,omitempty"`
 	STTAPIKey         string   `json:"stt_api_key,omitempty"`
+	STTModel          string   `json:"stt_model,omitempty"`
 	STTTenantID       string   `json:"stt_tenant_id,omitempty"`
 	STTTimeoutSeconds int      `json:"stt_timeout_seconds,omitempty"`
 }
@@ -57,7 +58,7 @@ func Factory(name string, creds json.RawMessage, cfg json.RawMessage,
 	ch := New(ChannelConfig{
 		DMPolicy:  ic.DMPolicy,
 		AllowFrom: ic.AllowFrom,
-	}, msgBus, pairingSvc, auth, NewSTTProxy(ic.STTProxyURL, ic.STTAPIKey, ic.STTTenantID, ic.STTTimeoutSeconds))
+	}, msgBus, pairingSvc, auth, NewSTTProxy(ic.STTProxyURL, ic.STTAPIKey, ic.STTModel, ic.STTTenantID, ic.STTTimeoutSeconds))
 
 	ch.SetName(name)
 	return ch, nil
