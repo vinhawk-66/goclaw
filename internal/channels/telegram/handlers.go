@@ -242,12 +242,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 				}
 
 			case "video", "animation":
-				// Video: notify user that video is not fully supported yet.
-				// Only add the notice when there is no caption/text — media tags haven't been
-				// prepended yet at this stage of the pipeline.
-				if content == "" {
-					extraContent += "\n\n[Video received — video content analysis is not yet supported, only caption text is processed]"
-				}
+				// Video files are handled by the read_video tool via MediaRef pipeline.
 			}
 
 			if m.FilePath != "" {

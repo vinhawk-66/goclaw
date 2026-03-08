@@ -341,13 +341,9 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 		ctx = l.loadHistoricalImagesForTool(ctx, mediaRefs, messages)
 	}
 
-	// 2b. Collect document MediaRefs (current + historical) for read_document tool.
+	// 2b. Collect document MediaRefs (historical + current) for read_document tool.
+	// Historical first, current last — so refs[len-1] is always the most recent file.
 	var docRefs []providers.MediaRef
-	for _, ref := range mediaRefs {
-		if ref.Kind == "document" {
-			docRefs = append(docRefs, ref)
-		}
-	}
 	for i := len(messages) - 1; i >= 0; i-- {
 		for _, ref := range messages[i].MediaRefs {
 			if ref.Kind == "document" {
@@ -355,17 +351,17 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 			}
 		}
 	}
+	for _, ref := range mediaRefs {
+		if ref.Kind == "document" {
+			docRefs = append(docRefs, ref)
+		}
+	}
 	if len(docRefs) > 0 {
 		ctx = tools.WithMediaDocRefs(ctx, docRefs)
 	}
 
-	// 2c. Collect audio MediaRefs (current + historical) for read_audio tool.
+	// 2c. Collect audio MediaRefs (historical + current) for read_audio tool.
 	var audioRefs []providers.MediaRef
-	for _, ref := range mediaRefs {
-		if ref.Kind == "audio" {
-			audioRefs = append(audioRefs, ref)
-		}
-	}
 	for i := len(messages) - 1; i >= 0; i-- {
 		for _, ref := range messages[i].MediaRefs {
 			if ref.Kind == "audio" {
@@ -373,22 +369,27 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 			}
 		}
 	}
+	for _, ref := range mediaRefs {
+		if ref.Kind == "audio" {
+			audioRefs = append(audioRefs, ref)
+		}
+	}
 	if len(audioRefs) > 0 {
 		ctx = tools.WithMediaAudioRefs(ctx, audioRefs)
 	}
 
-	// 2d. Collect video MediaRefs (current + historical) for read_video tool.
+	// 2d. Collect video MediaRefs (historical + current) for read_video tool.
 	var videoRefs []providers.MediaRef
-	for _, ref := range mediaRefs {
-		if ref.Kind == "video" {
-			videoRefs = append(videoRefs, ref)
-		}
-	}
 	for i := len(messages) - 1; i >= 0; i-- {
 		for _, ref := range messages[i].MediaRefs {
 			if ref.Kind == "video" {
 				videoRefs = append(videoRefs, ref)
 			}
+		}
+	}
+	for _, ref := range mediaRefs {
+		if ref.Kind == "video" {
+			videoRefs = append(videoRefs, ref)
 		}
 	}
 	if len(videoRefs) > 0 {

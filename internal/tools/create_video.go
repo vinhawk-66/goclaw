@@ -3,7 +3,6 @@ package tools
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,7 +27,7 @@ var videoGenModelDefaults = map[string]string{
 }
 
 // CreateVideoTool generates videos using a video generation API.
-// Uses Gemini Veo via native generateContent API with VIDEO response modality.
+// Uses Gemini Veo via predictLongRunning API (async with polling).
 type CreateVideoTool struct {
 	registry *providers.Registry
 }
@@ -53,11 +52,11 @@ func (t *CreateVideoTool) Parameters() map[string]interface{} {
 			},
 			"duration": map[string]interface{}{
 				"type":        "integer",
-				"description": "Video duration in seconds (default 5, max 30).",
+				"description": "Video duration in seconds: 4, 6, or 8 (default 8).",
 			},
 			"aspect_ratio": map[string]interface{}{
 				"type":        "string",
-				"description": "Aspect ratio: '16:9' (default), '9:16', '1:1'.",
+				"description": "Aspect ratio: '16:9' (default) or '9:16'.",
 			},
 		},
 		"required": []string{"prompt"},
@@ -70,26 +69,28 @@ func (t *CreateVideoTool) Execute(ctx context.Context, args map[string]interface
 		return ErrorResult("prompt is required")
 	}
 
-	// Parse and enforce duration (default 5, max 30).
-	duration := 5
+	// Parse and enforce duration. Veo supports 4, 6, or 8 seconds.
+	duration := 8
 	if d, ok := args["duration"].(float64); ok {
 		duration = int(d)
 	}
-	if duration < 1 {
-		duration = 1
-	}
-	if duration > 30 {
-		duration = 30
+	switch {
+	case duration <= 4:
+		duration = 4
+	case duration <= 6:
+		duration = 6
+	default:
+		duration = 8
 	}
 
-	// Parse and validate aspect ratio.
+	// Parse and validate aspect ratio. Veo supports 16:9 and 9:16.
 	aspectRatio := "16:9"
 	if ar, _ := args["aspect_ratio"].(string); ar != "" {
 		switch ar {
-		case "16:9", "9:16", "1:1":
+		case "16:9", "9:16":
 			aspectRatio = ar
 		default:
-			return ErrorResult(fmt.Sprintf("unsupported aspect_ratio %q; use '16:9', '9:16', or '1:1'", ar))
+			return ErrorResult(fmt.Sprintf("unsupported aspect_ratio %q; use '16:9' or '9:16'", ar))
 		}
 	}
 
@@ -186,24 +187,24 @@ func (t *CreateVideoTool) resolveConfig(ctx context.Context) (providerName, mode
 	return providerName, model
 }
 
-// callGeminiVideoGen uses the native Gemini generateContent API with VIDEO response modality.
+// callGeminiVideoGen uses the Gemini predictLongRunning API for Veo video generation.
+// Flow: POST predictLongRunning → poll operation → download video from URI.
 func (t *CreateVideoTool) callGeminiVideoGen(ctx context.Context, apiKey, apiBase, model, prompt string, duration int, aspectRatio string) ([]byte, *providers.Usage, error) {
 	nativeBase := strings.TrimRight(apiBase, "/")
 	nativeBase = strings.TrimSuffix(nativeBase, "/openai")
 
-	url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", nativeBase, model, apiKey)
-
-	genConfig := map[string]interface{}{
-		"responseModalities": []string{"VIDEO"},
-		"videoDuration":      duration,
-		"aspectRatio":        aspectRatio,
-	}
+	// 1. Start long-running video generation.
+	predictURL := fmt.Sprintf("%s/models/%s:predictLongRunning", nativeBase, model)
 
 	body := map[string]interface{}{
-		"contents": []map[string]interface{}{
-			{"parts": []map[string]interface{}{{"text": prompt}}},
+		"instances": []map[string]interface{}{
+			{"prompt": prompt},
 		},
-		"generationConfig": genConfig,
+		"parameters": map[string]interface{}{
+			"aspectRatio":      aspectRatio,
+			"durationSeconds":  duration,
+			"personGeneration": "allow_all",
+		},
 	}
 
 	jsonBody, err := json.Marshal(body)
@@ -211,14 +212,14 @@ func (t *CreateVideoTool) callGeminiVideoGen(ctx context.Context, apiKey, apiBas
 		return nil, nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", predictURL, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", apiKey)
 
-	// Video generation can take a while.
-	client := &http.Client{Timeout: 300 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("http request: %w", err)
@@ -233,49 +234,124 @@ func (t *CreateVideoTool) callGeminiVideoGen(ctx context.Context, apiKey, apiBas
 		return nil, nil, fmt.Errorf("API error %d: %s", resp.StatusCode, truncateBytes(respBody, 500))
 	}
 
-	// Parse Gemini response — look for inlineData with video MIME.
-	var gemResp struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					InlineData *struct {
-						MimeType string `json:"mimeType"`
-						Data     string `json:"data"`
-					} `json:"inlineData"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
-		UsageMetadata *struct {
-			PromptTokenCount     int `json:"promptTokenCount"`
-			CandidatesTokenCount int `json:"candidatesTokenCount"`
-			TotalTokenCount      int `json:"totalTokenCount"`
-		} `json:"usageMetadata"`
+	var opResp struct {
+		Name string `json:"name"`
+		Done bool   `json:"done"`
 	}
-	if err := json.Unmarshal(respBody, &gemResp); err != nil {
-		return nil, nil, fmt.Errorf("parse response: %w", err)
+	if err := json.Unmarshal(respBody, &opResp); err != nil {
+		return nil, nil, fmt.Errorf("parse operation response: %w", err)
+	}
+	if opResp.Name == "" {
+		return nil, nil, fmt.Errorf("no operation name in response: %s", truncateBytes(respBody, 300))
 	}
 
-	for _, cand := range gemResp.Candidates {
-		for _, part := range cand.Content.Parts {
-			if part.InlineData != nil && strings.HasPrefix(part.InlineData.MimeType, "video/") {
-				videoBytes, err := base64.StdEncoding.DecodeString(part.InlineData.Data)
-				if err != nil {
-					return nil, nil, fmt.Errorf("decode base64: %w", err)
-				}
-				var usage *providers.Usage
-				if gemResp.UsageMetadata != nil {
-					usage = &providers.Usage{
-						PromptTokens:     gemResp.UsageMetadata.PromptTokenCount,
-						CompletionTokens: gemResp.UsageMetadata.CandidatesTokenCount,
-						TotalTokens:      gemResp.UsageMetadata.TotalTokenCount,
-					}
-				}
-				return videoBytes, usage, nil
-			}
+	slog.Info("create_video: operation started", "operation", opResp.Name)
+
+	// 2. Poll operation until done (max ~6 minutes, poll every 10s).
+	pollURL := fmt.Sprintf("%s/%s", nativeBase, opResp.Name)
+	const maxPolls = 40
+	const pollInterval = 10 * time.Second
+
+	var doneBody []byte
+	for i := 0; i < maxPolls; i++ {
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-time.After(pollInterval):
 		}
+
+		pollReq, err := http.NewRequestWithContext(ctx, "GET", pollURL, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("create poll request: %w", err)
+		}
+		pollReq.Header.Set("x-goog-api-key", apiKey)
+
+		pollResp, err := client.Do(pollReq)
+		if err != nil {
+			slog.Warn("create_video: poll error, retrying", "error", err, "attempt", i+1)
+			continue
+		}
+
+		pollBody, _ := io.ReadAll(pollResp.Body)
+		pollResp.Body.Close()
+
+		if pollResp.StatusCode != http.StatusOK {
+			return nil, nil, fmt.Errorf("poll API error %d: %s", pollResp.StatusCode, truncateBytes(pollBody, 500))
+		}
+
+		var pollOp struct {
+			Done  bool            `json:"done"`
+			Error json.RawMessage `json:"error"`
+		}
+		if err := json.Unmarshal(pollBody, &pollOp); err != nil {
+			return nil, nil, fmt.Errorf("parse poll response: %w", err)
+		}
+
+		if pollOp.Error != nil && string(pollOp.Error) != "null" {
+			return nil, nil, fmt.Errorf("video generation error: %s", truncateBytes(pollOp.Error, 500))
+		}
+
+		if pollOp.Done {
+			doneBody = pollBody
+			break
+		}
+
+		slog.Info("create_video: polling", "attempt", i+1, "done", pollOp.Done)
 	}
 
-	return nil, nil, fmt.Errorf("no video data in Gemini response")
+	if doneBody == nil {
+		return nil, nil, fmt.Errorf("video generation timed out after %d polls", maxPolls)
+	}
+
+	// 3. Extract video URI and download.
+	var result struct {
+		Response struct {
+			GenerateVideoResponse struct {
+				GeneratedSamples []struct {
+					Video struct {
+						URI      string `json:"uri"`
+						MimeType string `json:"mimeType"`
+					} `json:"video"`
+				} `json:"generatedSamples"`
+			} `json:"generateVideoResponse"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(doneBody, &result); err != nil {
+		return nil, nil, fmt.Errorf("parse final response: %w", err)
+	}
+
+	samples := result.Response.GenerateVideoResponse.GeneratedSamples
+	if len(samples) == 0 || samples[0].Video.URI == "" {
+		return nil, nil, fmt.Errorf("no video in response: %s", truncateBytes(doneBody, 300))
+	}
+
+	videoURI := samples[0].Video.URI
+	slog.Info("create_video: downloading video", "uri", videoURI)
+
+	dlReq, err := http.NewRequestWithContext(ctx, "GET", videoURI, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create download request: %w", err)
+	}
+	dlReq.Header.Set("x-goog-api-key", apiKey)
+
+	dlClient := &http.Client{Timeout: 120 * time.Second}
+	dlResp, err := dlClient.Do(dlReq)
+	if err != nil {
+		return nil, nil, fmt.Errorf("download video: %w", err)
+	}
+	defer dlResp.Body.Close()
+
+	if dlResp.StatusCode != http.StatusOK {
+		dlBody, _ := io.ReadAll(dlResp.Body)
+		return nil, nil, fmt.Errorf("download error %d: %s", dlResp.StatusCode, truncateBytes(dlBody, 300))
+	}
+
+	videoBytes, err := io.ReadAll(dlResp.Body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read video data: %w", err)
+	}
+
+	return videoBytes, nil, nil
 }
 
 // callChatVideoGen tries OpenAI-compatible chat completions with video modality.

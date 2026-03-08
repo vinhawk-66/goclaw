@@ -64,6 +64,13 @@ func (h *ProvidersHandler) handleVerifyProvider(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Non-chat models (image/video generation) can't be verified via Chat API.
+	// Accept them if the provider is reachable (already validated above).
+	if isNonChatModel(req.Model) {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"valid": true, "note": "generation model accepted (not verifiable via chat)"})
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
@@ -118,6 +125,23 @@ func (h *ProvidersHandler) handleClaudeCLIAuthStatus(w http.ResponseWriter, r *h
 		"email":             status.Email,
 		"subscription_type": status.SubscriptionType,
 	})
+}
+
+// isNonChatModel returns true for models that cannot be verified via Chat API
+// (image/video generation models).
+func isNonChatModel(model string) bool {
+	nonChatPrefixes := []string{
+		"veo-", "google/veo-",
+		"dall-e-", "imagen-", "google/imagen-",
+		"gemini-2.5-flash-image", "google/gemini-2.5-flash-image",
+	}
+	m := strings.ToLower(model)
+	for _, prefix := range nonChatPrefixes {
+		if strings.HasPrefix(m, prefix) || strings.Contains(m, "/"+prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // friendlyVerifyError extracts a human-readable message from provider errors.
