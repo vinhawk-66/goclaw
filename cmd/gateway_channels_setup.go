@@ -15,6 +15,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/channels/feishu"
 	slackchannel "github.com/nextlevelbuilder/goclaw/internal/channels/slack"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/telegram"
+	"github.com/nextlevelbuilder/goclaw/internal/channels/voicebox"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/whatsapp"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/zalo"
 	zalopersonal "github.com/nextlevelbuilder/goclaw/internal/channels/zalo/personal"
@@ -96,6 +97,20 @@ func registerConfigChannels(cfg *config.Config, channelMgr *channels.Manager, ms
 			channelMgr.RegisterChannel(channels.TypeFeishu, f)
 			slog.Info("feishu/lark channel enabled (config)")
 		}
+	}
+
+	if cfg.Channels.Voicebox.Enabled && instanceLoader == nil {
+		vbCfg := cfg.Channels.Voicebox
+		var auth *voicebox.TokenAuth
+		if vbCfg.AuthMode == "token" && vbCfg.SecretKey != "" {
+			auth = voicebox.NewTokenAuth(vbCfg.SecretKey, vbCfg.TokenExpiry, vbCfg.AllowedDevices)
+		}
+		vb := voicebox.New(voicebox.ChannelConfig{
+			DMPolicy:  vbCfg.DMPolicy,
+			AllowFrom: []string(vbCfg.AllowFrom),
+		}, msgBus, pgStores.Pairing, auth, voicebox.NewSTTProxy(vbCfg.STTProxyURL, vbCfg.STTAPIKey, vbCfg.STTTenantID, vbCfg.STTTimeoutSeconds))
+		channelMgr.RegisterChannel("voicebox", vb)
+		slog.Info("voicebox channel enabled (config)")
 	}
 }
 

@@ -11,11 +11,11 @@ flowchart LR
     subgraph Platforms
         TG["Telegram"]
         DC["Discord"]
-        SL["Slack"]
         FS["Feishu/Lark"]
         ZL["Zalo OA"]
         ZLP["Zalo Personal"]
         WA["WhatsApp"]
+        VB["Voicebox"]
     end
 
     subgraph "Channel Layer"
@@ -35,11 +35,11 @@ flowchart LR
 
     TG --> CH
     DC --> CH
-    SL --> CH
     FS --> CH
     ZL --> CH
     ZLP --> CH
     WA --> CH
+    VB --> CH
     CH --> HM
     HM --> BUS
     BUS --> AGENT
@@ -48,16 +48,16 @@ flowchart LR
     DISPATCH --> SEND
     SEND --> TG
     SEND --> DC
-    SEND --> SL
     SEND --> FS
     SEND --> ZL
     SEND --> ZLP
     SEND --> WA
+    SEND --> VB
 ```
 
 Internal channels (`cli`, `system`, `subagent`) are silently skipped by the outbound dispatcher and never forwarded to external platforms.
 
-### Handoff Routing
+### Handoff Routing (Managed Mode)
 
 Before normal agent routing, the consumer checks the `handoff_routes` table for an active routing override. If a handoff route exists for the incoming channel + chat ID, the message is redirected to the target agent instead of the original.
 
@@ -92,7 +92,7 @@ Every channel must implement the base interface:
 | Interface | Purpose | Implemented By |
 |-----------|---------|----------------|
 | `StreamingChannel` | Real-time streaming updates | Telegram, Feishu |
-| `WebhookChannel` | Webhook HTTP handler mounting | Feishu |
+| `WebhookChannel` | Webhook HTTP handler mounting | Feishu, Voicebox |
 | `ReactionChannel` | Status reactions on messages | Telegram, Feishu |
 
 `BaseChannel` provides a shared implementation that all channels embed: allowlist matching, `HandleMessage()`, `CheckPolicy()`, and user ID extraction.
@@ -104,7 +104,7 @@ Channels implementing `WebhookChannel` expose an HTTP handler that can be mounte
 ```mermaid
 flowchart TD
     GW["Gateway HTTP Mux"] --> WH{"WebhookChannel?"}
-    WH -->|Yes| MOUNT["Mount handler on main mux<br/>(e.g., /feishu/events)"]
+    WH -->|Yes| MOUNT["Mount handler on main mux<br/>(e.g., /feishu/events, /voicebox/v1/)"]
     WH -->|No| SKIP["Channel uses its own transport<br/>(polling, gateway events, etc.)"]
 ```
 
@@ -157,22 +157,22 @@ flowchart TD
 
 ## 4. Channel Comparison
 
-| Feature | Telegram | Feishu/Lark | Discord | Slack | WhatsApp | Zalo OA | Zalo Personal |
-|---------|----------|-------------|---------|-------|----------|---------|---------------|
-| Connection | Long polling | WS (default) / Webhook | Gateway events | Socket Mode | External WS bridge | Long polling | Internal protocol |
-| DM support | Yes | Yes | Yes | Yes | Yes | Yes (DM only) | Yes |
-| Group support | Yes (mention gating) | Yes | Yes | Yes (mention gating + thread cache) | Yes | No | Yes |
-| Forum/Topics | Yes (per-topic config) | Yes (topic session mode) | -- | -- | -- | -- | -- |
-| Message limit | 4,096 chars | Configurable (default 4,000) | 2,000 chars | 4,000 chars | N/A (bridge) | 2,000 chars | 2,000 chars |
-| Streaming | Typing indicator | Streaming message cards | Edit "Thinking..." | Edit "Thinking..." (throttled 1s) | No | No | No |
-| Media | Photos, voice, files | Images, files (30 MB) | Files, embeds | Files (download w/ SSRF protection) | JSON messages | Images (5 MB) | -- |
-| Speech-to-text | Yes (STT proxy) | -- | -- | -- | -- | -- | -- |
-| Voice routing | Yes (VoiceAgentID) | -- | -- | -- | -- | -- | -- |
-| Rich formatting | Markdown → HTML | Card messages | Markdown | Markdown → mrkdwn | Plain text | Plain text | Plain text |
-| Bot commands | 10+ commands | -- | -- | -- | -- | -- | -- |
-| Tool allow list | Per-topic | -- | -- | -- | -- | -- | -- |
-| Pairing support | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| Status reactions | Yes | Yes | -- | Yes | -- | -- | -- |
+| Feature | Telegram | Feishu/Lark | Discord | Slack | WhatsApp | Voicebox | Zalo OA | Zalo Personal |
+|---------|----------|-------------|---------|-------|----------|----------|---------|---------------|
+| Connection | Long polling | WS (default) / Webhook | Gateway events | Socket Mode | External WS bridge | WS webhook path (`/voicebox/v1/`) | Long polling | Internal protocol |
+| DM support | Yes | Yes | Yes | Yes | Yes | Yes (device direct) | Yes (DM only) | Yes |
+| Group support | Yes (mention gating) | Yes | Yes | Yes (mention gating + thread cache) | Yes | No | No | Yes |
+| Forum/Topics | Yes (per-topic config) | Yes (topic session mode) | -- | -- | -- | -- | -- | -- |
+| Message limit | 4,096 chars | Configurable (default 4,000) | 2,000 chars | 4,000 chars | N/A (bridge) | Audio stream + JSON control events | 2,000 chars | 2,000 chars |
+| Streaming | Typing indicator | Streaming message cards | Edit "Thinking..." | Edit "Thinking..." (throttled 1s) | No | Sentence-by-sentence TTS + binary frames | No | No |
+| Media | Photos, voice, files | Images, files (30 MB) | Files, embeds | JSON messages | JSON messages | Opus audio frames | Images (5 MB) | -- |
+| Speech-to-text | Yes (STT proxy) | -- | -- | -- | -- | Yes (STT proxy) | -- | -- |
+| Voice routing | Yes (VoiceAgentID) | -- | -- | -- | -- | Native voice channel | -- | -- |
+| Rich formatting | Markdown → HTML | Card messages | Markdown | Plain text | Plain text | JSON events (`llm`, `tts`, `stt`, `alert`) | Plain text | Plain text |
+| Bot commands | 10+ commands | -- | -- | -- | -- | -- | -- | -- |
+| Tool allow list | Per-topic | -- | -- | -- | -- | -- | -- | -- |
+| Pairing support | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Status reactions | Yes | Yes | -- | -- | -- | -- | -- | -- |
 
 ---
 
@@ -185,7 +185,7 @@ The Telegram channel uses long polling via the `telego` library (Telegram Bot AP
 - **Group mention gating**: By default, bot must be @mentioned in groups (`requireMention: true`). Pending messages without a mention are stored in a history buffer (default 50 messages) and included as context when the bot is eventually mentioned.
 - **Typing indicator**: A "typing" action is sent while the agent is processing.
 - **Proxy support**: Optional HTTP proxy configured via channel config.
-- **Cancel commands**: `/stop` and `/stopall` intercepted before the 800ms debouncer. See [08-scheduling-cron.md](./08-scheduling-cron.md) for details.
+- **Cancel commands**: `/stop` and `/stopall` intercepted before the 800ms debouncer. See [08-scheduling-cron-heartbeat.md](./08-scheduling-cron-heartbeat.md).
 - **Concurrent group support**: Group sessions support up to 3 concurrent agent runs.
 - **Bot reply as implicit mention**: Replying to a bot message in a group counts as mentioning the bot.
 
@@ -388,50 +388,7 @@ The Discord channel uses the `discordgo` library to connect via the Discord Gate
 
 ---
 
-## 8. Slack
-
-The Slack channel uses the `slack-go/slack` library to connect via Socket Mode (WebSocket).
-
-### Key Behaviors
-
-- **Socket Mode**: Uses `xapp-` App-Level Token for WebSocket connection (no public URL needed)
-- **Three token types**: `xoxb-` (Bot Token, required), `xapp-` (App-Level Token, required), `xoxp-` (User Token, optional for custom identity)
-- **Token prefix validation**: Tokens validated at startup (`xoxb-`, `xapp-`, `xoxp-` prefixes)
-- **Message limit**: 4,000-character limit with automatic splitting at newline boundaries
-- **Placeholder editing**: Sends "Thinking..." → edits with actual response (same as Discord)
-- **Mention gating**: `requireMention` default true; `<@botUserID>` stripped from content
-- **Thread participation cache**: After bot replies in a thread, subsequent messages in that thread auto-trigger response without @mention (24h TTL)
-- **Message dedup**: `channel+ts` key prevents duplicate processing on Socket Mode reconnect
-- **Message debounce**: Per-thread batching of rapid messages (300ms default, configurable)
-- **Dead socket classification**: Non-retryable auth errors (invalid_auth, token_revoked) fail fast instead of infinite reconnect
-- **Streaming**: Edit-in-place via `chat.update` with 1000ms throttle (Slack Tier 3 rate limit)
-- **Reactions**: Status emoji on user messages (thinking_face, hammer_and_wrench, white_check_mark, x, hourglass)
-- **SSRF protection**: File download hostname allowlist (*.slack.com, *.slack-edge.com, *.slack-files.com), auth token stripped on redirect
-- **Health probe**: `auth.test()` with 2.5s timeout for monitoring integration
-
-### Formatting Pipeline
-
-```
-LLM markdown → htmlTagsToMarkdown() → extractSlackTokens() → escapeHTMLEntities()
-→ extractCodeBlocks() → convertTablesToCodeBlocks() → bold/strike/header/link conversion
-→ restore tokens/code blocks → Slack mrkdwn
-```
-
-Key conversions: `**bold**` → `*bold*`, `~~strike~~` → `~strike~`, `[text](url)` → `<url|text>`, `# Header` → `*Header*`, tables → code blocks.
-
-### Environment Variables
-
-```
-GOCLAW_SLACK_BOT_TOKEN   → channels.slack.bot_token
-GOCLAW_SLACK_APP_TOKEN   → channels.slack.app_token
-GOCLAW_SLACK_USER_TOKEN  → channels.slack.user_token (optional)
-```
-
-Auto-enables when both bot_token and app_token are set.
-
----
-
-## 9. WhatsApp
+## 8. WhatsApp
 
 The WhatsApp channel communicates through an external WebSocket bridge (e.g., whatsapp-web.js based). GoClaw does not implement the WhatsApp protocol directly.
 
@@ -442,6 +399,39 @@ The WhatsApp channel communicates through an external WebSocket bridge (e.g., wh
 - **Auto-reconnect**: Exponential backoff (1s → 30s max)
 - **DM and group support**: Group detection via `@g.us` suffix in chat ID
 - **Media handling**: Array of file paths from bridge protocol
+
+---
+
+## 9. Voicebox
+
+The Voicebox channel provides a xiaozhi-esp32 compatible voice protocol over WebSocket. Devices connect to `/voicebox/v1/` and keep a single long-lived session per device ID.
+
+### Key Behaviors
+
+- **Handshake**: Client sends JSON `hello`, server replies with `hello` including `session_id` and output audio params (24kHz, 60ms frame duration).
+- **Protocol versions**: Supports binary frame v1/v2/v3 (`Protocol-Version` header), plus optional MQTT gateway envelope stripping (`from=mqtt_gateway`).
+- **Listen flow**: `listen(start|detect)` enables capture, audio binary frames are buffered, `listen(stop)` triggers STT and publishes text to the agent loop.
+- **TTS flow**: Outbound replies send `llm(emotion)` + `tts(start)` + `tts(sentence_start)` events and stream binary Opus frames, then `tts(stop)`.
+- **Abort**: Incoming `abort` cancels in-flight TTS playback immediately.
+- **DM policy default**: `pairing` (secure by default). `allowlist`, `open`, and `disabled` are also supported.
+- **Auth modes**: `open` or HMAC `token`. In token mode, `secret_key` is required and failures log `security.voicebox.auth_failed`.
+- **Origin policy**: WebSocket upgrade allows empty `Origin` (embedded devices) or same-host origin only.
+- **Singleton enabled instance**: Managed mode enforces at most one enabled Voicebox instance (API validation + DB partial unique index).
+
+### Configuration (Managed Channel Instance)
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `dm_policy` | `pairing` | `pairing`, `allowlist`, `open`, `disabled` |
+| `auth_mode` | `open` | `open` or `token` |
+| `token_expiry` | `2592000` | Token expiry in seconds (30 days default) |
+| `allowed_devices` | -- | Token bypass allowlist for specific `device_id` values |
+| `allow_from` | -- | Allowlist used when `dm_policy=allowlist` |
+| `stt_proxy_url` | -- | STT proxy endpoint (`/transcribe_audio` is auto-appended when needed) |
+| `stt_api_key` | -- | Bearer token for STT proxy |
+| `stt_tenant_id` | -- | Optional tenant ID forwarded to STT proxy |
+| `stt_timeout_seconds` | `30` | STT request timeout |
+| `credentials.secret_key` | -- | Required when `auth_mode=token` |
 
 ---
 
@@ -504,7 +494,7 @@ flowchart TD
     WS2 --> USER3["user_charlie/"]
 ```
 
-Channel instances are loaded from the database with their assigned agent ID. The agent key is resolved and propagated through the message pipeline, ensuring all filesystem tools, context files, and memory operations use the correct workspace.
+In managed mode, channel instances are loaded from the database with their assigned agent ID. The agent key is resolved and propagated through the message pipeline, ensuring all filesystem tools, context files, and memory operations use the correct workspace.
 
 ---
 
@@ -519,18 +509,19 @@ Thread/topic context is preserved through the entire message pipeline using a `l
 | Telegram (thread) | `"-12345:thread:55"` |
 | Feishu (chat) | `"oc_xyz"` |
 | Feishu (topic) | `"oc_xyz:topic:{root_msg_id}"` |
+| Voicebox (device) | `"AA:BB:CC:DD:EE:FF"` |
 
 All channel state — placeholders, streams, reactions, typing controllers, thread IDs — is keyed by this composite `local_key`. When delegation or team messages complete, the `local_key` from the original message is preserved in metadata and used to route the response back to the correct location.
 
 ---
 
-## 14. Per-User Isolation
+## 14. Managed Mode Behavior
 
-Channels provide per-user isolation through compound sender IDs and context propagation:
+In managed mode, channels provide per-user isolation through compound sender IDs and context propagation:
 
 - **User scoping**: Each channel constructs a compound sender ID (e.g., `telegram:123456`) which maps to a `user_id`. The session key format `agent:{agentId}:{channel}:direct:{peerId}` ensures each user has isolated conversation history per agent.
 - **Context propagation**: `HandleMessage()` injects `AgentID`, `UserID`, and `AgentType` into the context. These flow to the ContextFileInterceptor, MemoryInterceptor, and per-user file seeding.
-- **Pairing storage**: PostgreSQL (`pairing_requests` and `paired_devices` tables).
+- **Pairing storage**: PostgreSQL (`pairing_requests` and `paired_devices` tables) in managed mode; JSON files in standalone mode.
 - **Session persistence**: PostgreSQL `sessions` table with write-behind caching.
 
 ---
@@ -570,7 +561,7 @@ flowchart TD
 |------|---------|
 | `internal/channels/channel.go` | Channel interface, BaseChannel, extended interfaces, HandleMessage |
 | `internal/channels/manager.go` | Manager: registration, StartAll, StopAll, outbound dispatch, webhook collection |
-| `internal/channels/instance_loader.go` | DB-based channel instance loading |
+| `internal/channels/instance_loader.go` | DB-based channel instance loading (managed mode) |
 | `internal/channels/telegram/channel.go` | Telegram core: long polling, mention gating, typing indicators |
 | `internal/channels/telegram/handlers.go` | Message handling, media processing, forum topic detection |
 | `internal/channels/telegram/topic_config.go` | Per-topic config layering and resolution |
@@ -586,13 +577,16 @@ flowchart TD
 | `internal/channels/feishu/bot.go` | Bot message handlers |
 | `internal/channels/feishu/bot_policy.go` | Policy evaluation |
 | `internal/channels/discord/discord.go` | Discord: gateway events, placeholder editing |
-| `internal/channels/slack/slack.go` | Slack: Socket Mode, mention gating, thread caching |
-| `internal/channels/slack/format.go` | Markdown → Slack mrkdwn pipeline |
-| `internal/channels/slack/reactions.go` | Status emoji reactions on messages |
 | `internal/channels/whatsapp/whatsapp.go` | WhatsApp: external WS bridge |
+| `internal/channels/voicebox/channel.go` | Voicebox core channel, websocket upgrader, policy gates, webhook endpoint |
+| `internal/channels/voicebox/handler.go` | Voicebox connection lifecycle, hello handshake, read loop |
+| `internal/channels/voicebox/protocol.go` | Voicebox v1/v2/v3 binary frame parsing/building |
+| `internal/channels/voicebox/auth.go` | HMAC token verification and generation |
 | `internal/channels/zalo/zalo.go` | Zalo OA: Bot API, long polling |
 | `internal/channels/zalo/personal/channel.go` | Zalo Personal: reverse-engineered protocol |
+| `internal/pairing/service.go` | Pairing: code generation, approval, persistence |
 | `internal/store/pg/pairing.go` | Pairing: code generation, approval, persistence (database-backed) |
+| `migrations/000009_voicebox_single_enabled.up.sql` | Enforce single enabled Voicebox instance in managed mode |
 | `cmd/gateway_consumer.go` | Message routing: prefixes, handoff, cancel interception |
 
 ---
@@ -603,6 +597,6 @@ flowchart TD
 |----------|-----------------|
 | [00-architecture-overview.md](./00-architecture-overview.md) | Channel startup in gateway sequence |
 | [03-tools-system.md](./03-tools-system.md) | Tool policy engine, per-request tool allow list |
-| [08-scheduling-cron.md](./08-scheduling-cron.md) | /stop and /stopall commands, scheduler lanes, cron |
+| [08-scheduling-cron-heartbeat.md](./08-scheduling-cron-heartbeat.md) | /stop and /stopall commands, scheduler lanes |
 | [09-security.md](./09-security.md) | Group file writer restrictions, security logging |
 | [11-agent-teams.md](./11-agent-teams.md) | Team message routing, delegation result delivery |

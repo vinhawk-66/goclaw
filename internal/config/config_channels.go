@@ -20,6 +20,7 @@ type ChannelsConfig struct {
 	Zalo              ZaloConfig               `json:"zalo"`
 	ZaloPersonal      ZaloPersonalConfig       `json:"zalo_personal"`
 	Feishu            FeishuConfig             `json:"feishu"`
+	Voicebox          VoiceboxConfig           `json:"voicebox"`
 	PendingCompaction *PendingCompactionConfig `json:"pending_compaction,omitempty"` // global pending message compaction settings
 }
 
@@ -180,6 +181,22 @@ type FeishuConfig struct {
 	STTTenantID       string              `json:"stt_tenant_id,omitempty"`
 	STTTimeoutSeconds int                 `json:"stt_timeout_seconds,omitempty"`
 	VoiceAgentID      string              `json:"voice_agent_id,omitempty"`
+}
+
+// VoiceboxConfig configures the voicebox channel for ESP32 voice devices (standalone mode).
+type VoiceboxConfig struct {
+	Enabled           bool                `json:"enabled"`
+	AllowFrom         FlexibleStringSlice `json:"allow_from"`
+	DMPolicy          string              `json:"dm_policy,omitempty"`           // "open" (default), "pairing", "allowlist", "disabled"
+	AuthMode          string              `json:"auth_mode,omitempty"`           // "" (none) or "token" (HMAC-SHA256)
+	SecretKey         string              `json:"secret_key,omitempty"`          // required when auth_mode=token
+	TokenExpiry       int64               `json:"token_expiry,omitempty"`        // token TTL in seconds (default 3600)
+	AllowedDevices    []string            `json:"allowed_devices,omitempty"`     // device allowlist for token auth
+	STTProxyURL       string              `json:"stt_proxy_url,omitempty"`       // STT transcription endpoint
+	STTAPIKey         string              `json:"stt_api_key,omitempty"`         // STT Bearer token
+	STTModel          string              `json:"stt_model,omitempty"`           // STT model name (optional)
+	STTTenantID       string              `json:"stt_tenant_id,omitempty"`       // STT tenant identifier
+	STTTimeoutSeconds int                 `json:"stt_timeout_seconds,omitempty"` // per-request STT timeout (default 30s)
 }
 
 // ProvidersConfig maps provider name to its config.

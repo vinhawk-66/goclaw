@@ -2,7 +2,12 @@
 
 ## 1. Overview
 
-GoClaw is an AI agent gateway written in Go. It exposes a WebSocket RPC (v3) interface and an OpenAI-compatible HTTP API for orchestrating LLM-powered agents. The system uses PostgreSQL as its storage backend with full multi-tenant isolation, per-user context files, encrypted credentials, agent delegation, teams, and LLM call tracing.
+GoClaw is an AI agent gateway written in Go. It exposes a WebSocket RPC (v3) interface and an OpenAI-compatible HTTP API for orchestrating LLM-powered agents. The system supports two operating modes:
+
+- **Standalone** -- file-based storage with SQLite for per-user data, zero external dependencies beyond an LLM API key.
+- **Managed** -- PostgreSQL-backed multi-tenant mode with HTTP CRUD APIs, per-user context files, encrypted credentials, agent delegation, teams, and LLM call tracing.
+
+> **Documentation scope**: This documentation covers both modes. Standalone mode now has near-parity with managed mode for core features (per-user context files, workspace isolation, agent types, bootstrap onboarding). Managed mode adds agent delegation, teams, quality gates, tracing, HTTP CRUD APIs, and encrypted secrets.
 
 ## 2. Component Diagram
 
@@ -17,6 +22,7 @@ flowchart TD
         ZL[Zalo OA]
         ZLP[Zalo Personal]
         WA[WhatsApp]
+        VB[Voicebox]
     end
 
     subgraph Gateway["Gateway Server"]
@@ -42,7 +48,6 @@ flowchart TD
     subgraph Providers["LLM Providers"]
         ANTH[Anthropic -- Native HTTP + SSE]
         OAI["OpenAI-Compatible -- HTTP + SSE<br/>(OpenAI, Gemini, DeepSeek, DashScope, +8)"]
-        ACP["ACP -- JSON-RPC 2.0 stdio<br/>(Claude Code, Codex, Gemini CLI)"]
     end
 
     subgraph Tools["Tool Registry"]
@@ -84,7 +89,7 @@ flowchart TD
 
     WS --> WSS
     HTTP --> HTTPS
-    TG & DC & FS & ZL & ZLP & WA --> CM
+    TG & DC & FS & ZL & ZLP & WA & VB --> CM
 
     WSS --> MR
     HTTPS --> MR
@@ -110,24 +115,24 @@ flowchart TD
 | `internal/gateway/` | WebSocket + HTTP server, client handling, method router |
 | `internal/gateway/methods/` | RPC method handlers: chat, agents, agent_links, teams, delegations, sessions, config, skills, cron, pairing, exec approval, usage, send |
 | `internal/agent/` | Agent loop (think, act, observe), router, resolver, system prompt builder, sanitization, pruning, tracing, memory flush, DELEGATION.md + TEAM.md injection |
-| `internal/providers/` | LLM providers: Anthropic (native HTTP + SSE), OpenAI-compatible (HTTP + SSE, 12+ providers), DashScope (Qwen), ACP (JSON-RPC 2.0 subprocess), extended thinking support, retry logic |
-| `internal/providers/acp/` | ACP protocol implementation: ProcessPool (subprocess lifecycle), ToolBridge (fs/terminal), session management |
+| `internal/providers/` | LLM providers: Anthropic (native HTTP + SSE streaming), OpenAI-compatible (HTTP + SSE, 12+ providers), DashScope (Qwen), extended thinking support, retry logic |
 | `internal/tools/` | Tool registry, filesystem ops, exec/shell, policy engine, subagent, delegation manager, team tools, evaluate loop, handoff, context file + memory interceptors, credential scrubbing, rate limiting, PathDenyable |
 | `internal/tools/dynamic_loader.go` | Custom tool loader: LoadGlobal (startup), LoadForAgent (per-agent clone), ReloadGlobal (cache invalidation) |
 | `internal/tools/dynamic_tool.go` | Custom tool executor: command template rendering, shell escaping, encrypted env vars |
 | `internal/hooks/` | Hook engine: quality gates, command evaluator, agent evaluator, recursion prevention (`WithSkipHooks`) |
 | `internal/store/` | Store interfaces: SessionStore, AgentStore, ProviderStore, SkillStore, MemoryStore, CronStore, PairingStore, TracingStore, MCPServerStore, AgentLinkStore, TeamStore, ChannelInstanceStore, ConfigSecretsStore |
 | `internal/store/pg/` | PostgreSQL implementations (`database/sql` + `pgx/v5`) |
-| `internal/bootstrap/` | System prompt files (AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md, BOOTSTRAP.md) + seeding + truncation |
+| `internal/store/file/` | File-based implementations: sessions, memory (SQLite), cron, pairing, skills, agents (filesystem + SQLite) |
+| `internal/bootstrap/` | System prompt files (AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md, HEARTBEAT.md, BOOTSTRAP.md) + seeding + truncation |
 | `internal/config/` | Config loading (JSON5) + env var overlay |
 | `internal/skills/` | SKILL.md loader (5-tier hierarchy) + BM25 search + hot-reload via fsnotify |
-| `internal/channels/` | Channel manager + adapters: Telegram (forum topics, STT, bot commands), Feishu/Lark (streaming cards, media), Zalo OA, Zalo Personal, Discord, WhatsApp |
+| `internal/channels/` | Channel manager + adapters: Telegram (forum topics, STT, bot commands), Feishu/Lark (streaming cards, media), Slack, Voicebox (xiaozhi-compatible WebSocket voice protocol), Zalo OA, Zalo Personal, Discord, WhatsApp |
 | `internal/mcp/` | MCP server bridge (stdio, SSE, streamable-HTTP transports) |
 | `internal/scheduler/` | Lane-based concurrency control (main, subagent, cron, delegate lanes) with per-session serialization |
-| `internal/memory/` | Memory system (pgvector hybrid search) |
+| `internal/memory/` | Memory system (SQLite FTS5 + embeddings for standalone mode) |
 | `internal/permissions/` | RBAC policy engine (admin, operator, viewer roles) |
-| `internal/store/pg/pairing.go` | DM/device pairing service (8-character codes, database-backed) |
-| `internal/sessions/` | Session manager |
+| `internal/pairing/` | DM/device pairing service (8-character codes) |
+| `internal/sessions/` | File-based session manager (standalone mode) |
 | `internal/bus/` | Event pub/sub (Message Bus) |
 | `internal/sandbox/` | Docker-based code execution sandbox |
 | `internal/tts/` | Text-to-Speech providers: OpenAI, ElevenLabs, Edge, MiniMax |
@@ -135,10 +140,37 @@ flowchart TD
 | `internal/crypto/` | AES-256-GCM encryption for API keys |
 | `internal/tracing/` | LLM call tracing (traces + spans), in-memory buffer with periodic store flush |
 | `internal/tracing/otelexport/` | Optional OpenTelemetry OTLP exporter (opt-in via build tags; adds gRPC + protobuf) |
+| `internal/heartbeat/` | Periodic agent wake-up service |
 
 ---
 
-## 4. Multi-Tenant Identity Model
+## 4. Two Operating Modes
+
+| Aspect | Standalone | Managed |
+|--------|-----------|---------|
+| Config source | `config.json` + env vars | `config.json` + `GOCLAW_POSTGRES_DSN` |
+| Storage | JSON files + SQLite (`~/.goclaw/data/agents.db`) | PostgreSQL |
+| Agents | Defined in `config.json` `agents.list`, created eagerly at startup | `agents` table, lazy-resolved via `ManagedResolver` |
+| Agent store | `FileAgentStore` (filesystem + SQLite) | `PGAgentStore` |
+| Context files | Agent-level on filesystem, per-user in SQLite | `agent_context_files` + `user_context_files` tables |
+| Agent types | `open` / `predefined` (via config) | `open` (7 per-user files) / `predefined` (agent-level + USER.md per-user) |
+| Per-user isolation | Workspace subdirectories (`user_alice/`, `user_bob/`) | Same + DB-scoped context files |
+| Bootstrap onboarding | Per-user BOOTSTRAP.md seeding (SQLite) | Same (PostgreSQL) |
+| Agent delegation | N/A | Sync/async delegation, agent links, quality gates |
+| Agent teams | N/A | Shared task board, mailbox, handoff |
+| Skills | Filesystem only (workspace + global dirs) | PostgreSQL + filesystem + embedding search |
+| Memory | SQLite FTS5 + embeddings | pgvector hybrid (full-text search + vector similarity) |
+| Tracing | N/A | `traces` + `spans` tables + optional OTel OTLP export |
+| MCP servers | `config.json` `tools.mcp_servers` | `mcp_servers` table + grants |
+| API key storage | `.env.local` / env vars only | PostgreSQL (AES-256-GCM encrypted) |
+| HTTP CRUD API | N/A | `/v1/agents`, `/v1/skills`, `/v1/traces`, `/v1/mcp`, `/v1/delegations` |
+| Virtual FS | `ContextFileInterceptor` routes to SQLite | `ContextFileInterceptor` routes to PostgreSQL |
+| Custom tools | N/A | `custom_tools` table + `DynamicToolLoader` |
+| Managed-only stores (nil in standalone) | -- | ProviderStore, TracingStore, MCPServerStore, CustomToolStore, AgentLinkStore, TeamStore |
+
+---
+
+## 5. Multi-Tenant Identity Model
 
 GoClaw uses the **Identity Propagation** pattern (also known as **Trusted Subsystem**). It does not implement authentication or authorization — instead, it trusts the upstream service that authenticates with the gateway token to provide accurate user identity.
 
@@ -165,8 +197,8 @@ flowchart LR
 
 | Entry Point | How user_id is provided | Enforcement |
 |-------------|------------------------|-------------|
-| HTTP API | `X-GoClaw-User-Id` header | Required |
-| WebSocket | `user_id` field in `connect` handshake | Required |
+| HTTP API | `X-GoClaw-User-Id` header | Required in managed mode |
+| WebSocket | `user_id` field in `connect` handshake | Required in managed mode |
 | Channels | Derived from platform sender ID (e.g., Telegram user ID) | Automatic |
 
 ### Compound User ID Convention
@@ -208,34 +240,43 @@ sequenceDiagram
     GW->>GW: 2. Resolve workspace + data dirs
     GW->>GW: 3. Create Message Bus
 
-    GW->>PG: 4. Connect to Postgres (pg.NewPGStores)
-    PG-->>GW: PG stores created
-    GW->>GW: 5. Start tracing collector
-    GW->>PG: 6. Register providers from DB
-    GW->>PG: 7. Wire embedding provider to PGMemoryStore
-    GW->>PG: 8. Backfill memory embeddings (background)
+    alt Managed mode
+        GW->>PG: 4. Connect to Postgres (pg.NewPGStores)
+        PG-->>GW: PG stores created
+        GW->>GW: 5. Start tracing collector
+        GW->>PG: 6. Register providers from DB
+        GW->>PG: 7. Wire embedding provider to PGMemoryStore
+        GW->>PG: 8. Backfill memory embeddings (background)
+    else Standalone mode
+        GW->>GW: 4. Create file-based stores
+    end
 
     GW->>GW: 9. Register config-based providers
     GW->>GW: 10. Create tool registry (filesystem, exec, web, memory, browser, TTS, subagent, MCP)
-    GW->>GW: 11. Load bootstrap files (DB)
+    GW->>GW: 11. Load bootstrap files (DB or filesystem)
     GW->>GW: 12. Create skills loader + register skill_search tool
-    GW->>GW: 13. Wire skill embeddings
+    GW->>GW: 13. Wire skill embeddings (managed only)
 
-    GW->>GW: 14. Create agents lazily (set ManagedResolver)
-    GW->>GW: 15. wireManagedExtras (interceptors, cache subscribers)
-    GW->>GW: 16. Wire managed HTTP handlers (agents, skills, traces, MCP)
+    alt Managed mode
+        GW->>GW: 14. Create agents lazily (set ManagedResolver)
+        GW->>GW: 15. wireManagedExtras (interceptors, cache subscribers)
+        GW->>GW: 16. Wire managed HTTP handlers (agents, skills, traces, MCP)
+    else Standalone mode
+        GW->>GW: 14. Create agents eagerly from config
+        GW->>GW: 15. wireStandaloneExtras (FileAgentStore, interceptors, callbacks)
+    end
 
     GW->>Engine: 17. Create gateway server (WS + HTTP)
     GW->>Engine: 18. Register RPC methods
-    GW->>Engine: 19. Register + start channels (Telegram, Discord, Feishu, Zalo, WhatsApp)
-    GW->>Engine: 20. Start cron, scheduler (4 lanes)
+    GW->>Engine: 19. Register + start channels (Telegram, Discord, Feishu, Slack, Voicebox, Zalo, WhatsApp)
+    GW->>Engine: 20. Start cron, heartbeat, scheduler (4 lanes)
     GW->>Engine: 21. Start skills watcher + inbound consumer
     GW->>Engine: 22. Listen on host:port
 ```
 
 ---
 
-## 7. Database Wiring
+## 7. Managed Mode Wiring
 
 The `wireManagedExtras()` function in `cmd/gateway_managed.go` wires multi-tenant components:
 
@@ -253,6 +294,8 @@ flowchart TD
     W10["10. Hook Engine<br/>Quality gates with command + agent evaluators"] --> W11
     W11["11. Evaluate Loop + Handoff<br/>evaluate_loop tool + handoff tool"]
 ```
+
+A separate `wireStandaloneExtras()` in `cmd/gateway_standalone.go` wires the same core callbacks (user seeding, context file loading) using `FileAgentStore` instead of PostgreSQL.
 
 ### Cache Invalidation Events
 
@@ -344,7 +387,8 @@ When the process receives SIGINT or SIGTERM:
 1. Broadcast `shutdown` event to all connected WebSocket clients.
 2. `channelMgr.StopAll()` -- stop all channel adapters.
 3. `cronStore.Stop()` -- stop cron scheduler.
-4. `sandboxMgr.Stop()` + `ReleaseAll()` -- release Docker containers.
+4. `heartbeatSvc.Stop()` -- stop heartbeat service.
+5. `sandboxMgr.Stop()` + `ReleaseAll()` -- release Docker containers.
 6. `cancel()` -- cancel root context, propagating to consumer + scheduler.
 7. Deferred cleanup: flush tracing collector, close memory store, close browser manager, stop scheduler lanes.
 8. HTTP server shutdown with a **5-second timeout** (`context.WithTimeout`).
@@ -377,7 +421,7 @@ flowchart TD
 | `agents` | defaults (provider, model, context_window) + list (per-agent overrides) |
 | `tools` | profile, allow/deny lists, exec_approval, web, browser, mcp_servers, rate_limit_per_hour |
 | `channels` | Per-channel: enabled, token, dm_policy, group_policy, allow_from |
-| `database` | postgres_dsn read only from env var |
+| `database` | mode (standalone/managed); postgres_dsn read only from env var |
 
 ### Secret Handling
 
@@ -395,8 +439,9 @@ flowchart TD
 |------|---------|
 | `cmd/root.go` | Cobra CLI entry point, flag parsing |
 | `cmd/gateway.go` | Gateway startup orchestrator (`runGateway()`) |
-| `cmd/gateway_managed.go` | Database wiring (`wireManagedExtras()`, `wireManagedHTTP()`) |
-| `cmd/gateway_callbacks.go` | Shared callbacks (user seeding, context file loading) |
+| `cmd/gateway_managed.go` | Managed mode wiring (`wireManagedExtras()`, `wireManagedHTTP()`) |
+| `cmd/gateway_standalone.go` | Standalone mode wiring (`wireStandaloneExtras()`) |
+| `cmd/gateway_callbacks.go` | Shared callbacks for managed + standalone (user seeding, context file loading) |
 | `cmd/gateway_consumer.go` | Inbound message consumer (subagent, delegate, teammate, handoff routing) |
 | `cmd/gateway_providers.go` | Provider registration (config-based + DB-based) |
 | `cmd/gateway_methods.go` | RPC method registration |
@@ -425,10 +470,10 @@ flowchart TD
 | [02-providers.md](./02-providers.md) | LLM providers, retry logic, schema cleaning |
 | [03-tools-system.md](./03-tools-system.md) | Tool registry, policy engine, interceptors, custom tools, MCP grants |
 | [04-gateway-protocol.md](./04-gateway-protocol.md) | WebSocket protocol v3, HTTP API, RBAC, identity propagation |
-| [05-channels-messaging.md](./05-channels-messaging.md) | Channel adapters, Telegram formatting, pairing, per-user scoping |
+| [05-channels-messaging.md](./05-channels-messaging.md) | Channel adapters, Telegram formatting, pairing, managed-mode user scoping |
 | [06-store-data-model.md](./06-store-data-model.md) | Store interfaces, PostgreSQL schema, session caching, custom tool store |
 | [07-bootstrap-skills-memory.md](./07-bootstrap-skills-memory.md) | Bootstrap files, skills system, memory, skills grants |
-| [08-scheduling-cron.md](./08-scheduling-cron.md) | Scheduler lanes, cron lifecycle |
+| [08-scheduling-cron-heartbeat.md](./08-scheduling-cron-heartbeat.md) | Scheduler lanes, cron lifecycle, heartbeat |
 | [09-security.md](./09-security.md) | Defense layers, encryption, rate limiting, RBAC, sandbox |
 | [10-tracing-observability.md](./10-tracing-observability.md) | Tracing collector, span hierarchy, OTel export, trace API |
 | [11-agent-teams.md](./11-agent-teams.md) | Agent teams, task board, mailbox, delegation integration |

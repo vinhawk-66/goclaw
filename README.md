@@ -17,7 +17,7 @@ A Go port of [OpenClaw](https://github.com/openclaw/openclaw) with enhanced secu
 - **Single Binary** — ~25 MB static Go binary, no Node.js runtime, <1s startup, runs on a $5 VPS
 - **Production Security** — 5-layer defense: rate limiting, prompt injection detection, SSRF protection, shell deny patterns, AES-256-GCM encryption
 - **13+ LLM Providers** — Anthropic (native HTTP+SSE with prompt caching), OpenAI, OpenRouter, Groq, DeepSeek, Gemini, Mistral, xAI, MiniMax, Cohere, Perplexity, DashScope (Qwen), Bailian Coding + Claude CLI (stdio + MCP bridge), Codex (gpt-5.3-codex via OAuth)
-- **7 Messaging Channels** — Telegram (forum topics, STT), Discord, Slack, Zalo OA, Zalo Personal (DM + groups), Feishu/Lark (streaming cards, media), WhatsApp with `/stop` and `/stopall` commands
+- **8 Messaging Channels** — Telegram (forum topics, STT), Discord, Slack, Zalo OA, Zalo Personal (DM + groups), Feishu/Lark (streaming cards, media), WhatsApp with `/stop` and `/stopall` commands, and Voicebox (xiaozhi-compatible WebSocket voice protocol with STT/TTS)
 - **Extended Thinking** — Per-provider thinking mode (Anthropic budget tokens, OpenAI reasoning effort, DashScope thinking budget) with streaming support
 
 ## Claw Ecosystem
@@ -71,6 +71,8 @@ graph TB
         FS["Feishu/Lark"]
         ZL["Zalo OA"]
         ZLP["Zalo Personal"]
+        WA["WhatsApp"]
+        VB["Voicebox"]
         API["HTTP API"]
     end
 
@@ -90,7 +92,7 @@ graph TB
     end
 
     WEB --> WS
-    TG & DC & SL & FS & ZL & ZLP --> CM
+    TG & DC & SL & FS & ZL & ZLP & WA & VB --> CM
     API --> REST
     LOOP --> PG
 ```
@@ -324,7 +326,7 @@ Quality gates validate agent output before it reaches users. Configured in agent
 - **Feishu/Lark** — Streaming card updates, media attachments (images/files), mention resolution, topic session mode
 - **Zalo OA** — Official Account integration for DM conversations
 - **Zalo Personal** — Unofficial reverse-engineered protocol supporting DM + group messages with restrictive default policies
-- **Discord, WhatsApp** — Channel adapters with `/stop` and `/stopall` commands
+- **Discord, WhatsApp, Voicebox** — Channel adapters for chat and voice flows, including `/stop` and `/stopall` commands where supported
 - **Persistent pending messages** — Group chat messages persisted to PostgreSQL with auto-compaction (LLM summarization) when queues exceed threshold
 
 ### Knowledge & Memory
@@ -956,7 +958,7 @@ GOCLAW_OPENROUTER_API_KEY=sk-or-xxx go test -v ./tests/integration/ -timeout 120
 - **Agent handoff** — Conversation transfer between agents with routing overrides. Implementation complete, needs E2E testing.
 - **Quality gates** — Hook-based output validation with command and agent evaluator types. Implementation complete, needs E2E testing.
 - **Slack** — Channel integration implemented, not yet validated with real users.
-- **Other messaging channels** — Discord, Zalo OA, Zalo Personal, Feishu/Lark, WhatsApp channel adapters are implemented but have not been tested end-to-end in production. Only Telegram has been validated with real users.
+- **Other messaging channels** — Discord, Zalo OA, Zalo Personal, Feishu/Lark, WhatsApp, and Voicebox channel adapters are implemented but have not been tested end-to-end in production. Only Telegram has been validated with real users.
 - **OpenTelemetry export** — OTLP gRPC/HTTP exporter implemented (build-tag gated). In-app tracing works; external OTel export not validated in production.
 - **Tailscale integration** — tsnet listener implemented (build-tag gated). Not tested in a real deployment.
 - **Redis cache** — Optional distributed cache backend (build-tag gated). Not tested in production.
